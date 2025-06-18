@@ -64,13 +64,15 @@ jobs:
         run: cp .env apps/desktop/.env
         shell: bash
         
-      - name: Build app
-        working-directory: apps/desktop
-        run: |
-          pnpm -w cap-setup
-          pnpm tauri build --target ${{ matrix.settings.target }}
-        env:
-          RUST_TARGET_TRIPLE: ${{ matrix.settings.target }}
+              - name: Build app
+          working-directory: apps/desktop
+          run: |
+            pnpm -w cap-setup
+            pnpm tauri build --target ${{ matrix.settings.target }}
+          env:
+            RUST_TARGET_TRIPLE: ${{ matrix.settings.target }}
+            TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+            TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
           
       - name: Prepare artifacts (macOS)
         if: runner.os == 'macOS'
