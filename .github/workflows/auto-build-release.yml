@@ -1,0 +1,175 @@
+name: Auto-build Cap Desktop Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g., cap-v1.2.3)'
+        required: false
+        type: string
+  workflow_call:
+
+jobs:
+  get-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      tag: ${{ steps.get-version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Get version info
+        id: get-version
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            # Get the latest cap-v* tag
+            TAG=$(git tag -l "cap-v*" --sort=-version:refname | head -n1)
+          fi
+          
+          if [ -z "$TAG" ]; then
+            echo "No tag found"
+            exit 1
+          fi
+          
+          VERSION=${TAG#cap-v}
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION (tag: $TAG)"
+
+  build:
+    needs: get-version
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            name: "macOS Intel"
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            name: "macOS Apple Silicon"
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            name: "Windows x64"
+    
+    runs-on: ${{ matrix.settings.runner }}
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.get-version.outputs.tag }}
+          
+      - name: Rust setup
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+          
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.settings.target }}
+          
+      - uses: ./.github/actions/setup-js
+      
+      - name: Create .env file
+        run: |
+          echo "appVersion=${{ needs.get-version.outputs.version }}" >> .env
+          echo "VITE_ENVIRONMENT=production" >> .env
+          # Remove proprietary integrations for open source build
+          echo "VITE_SERVER_URL=https://cap.so" >> .env
+        shell: bash
+          
+      - name: Copy .env to desktop app
+        run: cp .env apps/desktop/.env
+        shell: bash
+        
+      - name: Build app
+        working-directory: apps/desktop
+        run: |
+          pnpm -w cap-setup
+          pnpm tauri build --target ${{ matrix.settings.target }} --no-bundle
+        env:
+          RUST_TARGET_TRIPLE: ${{ matrix.settings.target }}
+          
+      - name: Prepare artifacts (macOS)
+        if: matrix.settings.runner == 'macos-latest'
+        run: |
+          mkdir -p artifacts
+          cd apps/desktop/src-tauri/target/${{ matrix.settings.target }}/release
+          if [ -f "cap" ]; then
+            cp cap "$GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}"
+          fi
+          if [ -d "bundle" ]; then
+            cp -r bundle/* "$GITHUB_WORKSPACE/artifacts/" 2>/dev/null || true
+          fi
+          
+      - name: Prepare artifacts (Windows)
+        if: matrix.settings.runner == 'windows-latest'
+        run: |
+          mkdir artifacts
+          cd apps/desktop/src-tauri/target/${{ matrix.settings.target }}/release
+          if (Test-Path "cap.exe") {
+            Copy-Item "cap.exe" "$env:GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}.exe"
+          }
+          if (Test-Path "bundle") {
+            Copy-Item -Recurse "bundle/*" "$env:GITHUB_WORKSPACE/artifacts/" -ErrorAction SilentlyContinue
+          }
+        shell: powershell
+          
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cap-desktop-${{ matrix.settings.target }}
+          path: artifacts/
+          retention-days: 30
+
+  create-release:
+    needs: [get-version, build]
+    runs-on: ubuntu-latest
+    if: always() && needs.build.result == 'success'
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.get-version.outputs.tag }}
+          
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.get-version.outputs.tag }}
+          name: "Cap Desktop v${{ needs.get-version.outputs.version }} (Open Source Build)"
+          draft: false
+          prerelease: false
+          body: |
+            # Cap Desktop v${{ needs.get-version.outputs.version }}
+            
+            This is an **open source build** of Cap Desktop, built automatically from the [official source code](https://github.com/CapSoftware/Cap).
+            
+            ## Important Notes
+            - 🔓 **No commercial license required** - this build is from source code
+            - 🚫 **No proprietary features** - some cloud integrations may be disabled
+            - ⚠️ **Community build** - not officially supported by Cap team
+            - 🔄 **Auto-updated** - built automatically when new versions are released
+            
+            ## Downloads
+            - **macOS Apple Silicon**: Download the `.app` or binary for M1/M2/M3 Macs
+            - **macOS Intel**: Download the `.app` or binary for Intel Macs  
+            - **Windows x64**: Download the `.exe` file
+            
+            ## Source
+            Built from commit: ${{ github.sha }}
+            Original release: https://github.com/CapSoftware/Cap/releases/tag/${{ needs.get-version.outputs.tag }}
+          files: |
+            release-artifacts/**/*
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
