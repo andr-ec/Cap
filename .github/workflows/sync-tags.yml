@@ -1,0 +1,42 @@
+name: Sync Tags from Upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */12 * * *' # Every 12 hours
+
+jobs:
+  sync-tags:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote and fetch tags
+        run: |
+          git remote add upstream https://github.com/CapSoftware/Cap.git
+          git fetch upstream --tags
+          
+      - name: List all tags
+        run: |
+          echo "All tags from upstream:"
+          git tag -l "cap-v*" --sort=-version:refname
+          
+      - name: Push all tags to fork
+        run: |
+          echo "Pushing tags to fork..."
+          git push origin --tags
+          echo "Tags pushed successfully!"
+          
+      - name: List latest tags
+        run: |
+          echo "Latest 10 cap-v* tags now in fork:"
+          git tag -l "cap-v*" --sort=-version:refname | head -10 

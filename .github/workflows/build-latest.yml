@@ -1,0 +1,176 @@
+name: Build Latest Version
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create GitHub release'
+        type: boolean
+        default: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+    
+    runs-on: ${{ matrix.settings.runner }}
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Get version info
+        id: version
+        run: |
+          # Get version from Cargo.toml
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            VERSION=$(grep '^version = ' apps/desktop/src-tauri/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          else
+            VERSION=$(grep '^version = ' apps/desktop/src-tauri/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+        shell: bash
+          
+      - name: Rust setup
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+          
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.settings.target }}
+          
+      - uses: ./.github/actions/setup-js
+      
+      - name: Create .env file
+        run: |
+          echo "appVersion=${{ steps.version.outputs.version }}" >> .env
+          echo "VITE_ENVIRONMENT=production" >> .env
+          echo "VITE_SERVER_URL=https://cap.so" >> .env
+        shell: bash
+          
+      - name: Copy .env to desktop app
+        run: cp .env apps/desktop/.env
+        shell: bash
+        
+      - name: Build app
+        working-directory: apps/desktop
+        run: |
+          pnpm -w cap-setup
+          pnpm tauri build --target ${{ matrix.settings.target }}
+        env:
+          RUST_TARGET_TRIPLE: ${{ matrix.settings.target }}
+          
+      - name: Prepare artifacts (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p artifacts
+          cd apps/desktop/src-tauri/target/${{ matrix.settings.target }}/release
+          
+          # Copy the binary
+          if [ -f "cap" ]; then
+            cp cap "$GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}"
+            chmod +x "$GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}"
+          fi
+          
+          # Copy .app bundle if it exists
+          if [ -d "bundle/macos/Cap.app" ]; then
+            cp -r "bundle/macos/Cap.app" "$GITHUB_WORKSPACE/artifacts/"
+          fi
+          
+          # Copy .dmg if it exists
+          if [ -f "bundle/dmg/Cap.dmg" ]; then
+            cp "bundle/dmg/Cap.dmg" "$GITHUB_WORKSPACE/artifacts/Cap-${{ matrix.settings.target }}.dmg"
+          fi
+          
+      - name: Prepare artifacts (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir artifacts
+          cd apps/desktop/src-tauri/target/${{ matrix.settings.target }}/release
+          
+          # Copy the binary
+          if (Test-Path "cap.exe") {
+            Copy-Item "cap.exe" "$env:GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}.exe"
+          }
+          
+          # Copy installer if it exists
+          if (Test-Path "bundle/msi") {
+            Get-ChildItem "bundle/msi/*.msi" | ForEach-Object {
+              Copy-Item $_.FullName "$env:GITHUB_WORKSPACE/artifacts/Cap-${{ matrix.settings.target }}.msi"
+            }
+          }
+          
+          # Copy NSIS installer if it exists
+          if (Test-Path "bundle/nsis") {
+            Get-ChildItem "bundle/nsis/*.exe" | ForEach-Object {
+              Copy-Item $_.FullName "$env:GITHUB_WORKSPACE/artifacts/Cap-Setup-${{ matrix.settings.target }}.exe"
+            }
+          }
+        shell: powershell
+          
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cap-desktop-${{ matrix.settings.target }}
+          path: artifacts/
+          retention-days: 30
+
+  create-release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ inputs.create_release && always() && needs.build.result == 'success' }}
+    
+    steps:
+      - uses: actions/checkout@v4
+          
+      - name: Get version info
+        id: version
+        run: |
+          VERSION=$(grep '^version = ' apps/desktop/src-tauri/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+          
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "build-v${{ steps.version.outputs.version }}-${{ github.run_number }}"
+          name: "Cap Desktop v${{ steps.version.outputs.version }} (Build #${{ github.run_number }})"
+          draft: false
+          prerelease: false
+          body: |
+            # Cap Desktop v${{ steps.version.outputs.version }}
+            
+            **Open Source Build** - Built from the latest source code
+            
+            ## 📦 Downloads
+            - **macOS**: Look for `.app` bundles or `.dmg` files
+            - **Windows**: Look for `.exe` or `.msi` installer files
+            
+            ## ℹ️ Build Info
+            - **Built from**: `${{ github.ref }}`
+            - **Commit**: `${{ github.sha }}`
+            - **Build number**: `#${{ github.run_number }}`
+            - **Date**: `${{ github.event.head_commit.timestamp }}`
+            
+            > 🔓 No commercial license required for this build
+          files: |
+            release-artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
