@@ -86,8 +86,8 @@ jobs:
         run: |
           echo "appVersion=${{ needs.get-version.outputs.version }}" >> .env
           echo "VITE_ENVIRONMENT=production" >> .env
-          # Remove proprietary integrations for open source build
           echo "VITE_SERVER_URL=https://cap.so" >> .env
+          echo "RUST_TARGET_TRIPLE=${{ matrix.settings.target }}" >> .env
         shell: bash
           
       - name: Copy .env to desktop app
@@ -100,6 +100,9 @@ jobs:
           pnpm -w cap-setup
           pnpm build:tauri --target ${{ matrix.settings.target }} --config src-tauri/tauri.opensource.conf.json
         env:
+          # https://github.com/tauri-apps/tauri-action/issues/740
+          CI: false
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUST_TARGET_TRIPLE: ${{ matrix.settings.target }}
           TAURI_ENV_TARGET_TRIPLE: ${{ matrix.settings.target }}
           TAURI_SIGNING_PRIVATE_KEY: ""
