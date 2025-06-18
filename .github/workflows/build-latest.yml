@@ -68,7 +68,7 @@ jobs:
         working-directory: apps/desktop
         run: |
           pnpm -w cap-setup
-          pnpm tauri build --target ${{ matrix.settings.target }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          pnpm tauri build --target ${{ matrix.settings.target }} --config "{\"bundle\":{\"createUpdaterArtifacts\":false}}"
         env:
           RUST_TARGET_TRIPLE: ${{ matrix.settings.target }}
           TAURI_SIGNING_PRIVATE_KEY: ""
