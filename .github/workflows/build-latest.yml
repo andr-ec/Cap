@@ -64,25 +64,14 @@ jobs:
         run: cp .env apps/desktop/.env
         shell: bash
         
-      - name: Build app (Windows)
-        if: matrix.settings.runner == 'windows-latest'
+      - name: Build app
         working-directory: apps/desktop
         run: |
           pnpm -w cap-setup
-          pnpm tauri build --target ${{ matrix.settings.target }} --config '{\"bundle\":{\"createUpdaterArtifacts\":false}}'
+          pnpm build:tauri --target ${{ matrix.settings.target }} --config src-tauri/tauri.opensource.conf.json
         env:
           RUST_TARGET_TRIPLE: ${{ matrix.settings.target }}
-          TAURI_SIGNING_PRIVATE_KEY: ""
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-          
-      - name: Build app (macOS/Linux)
-        if: matrix.settings.runner != 'windows-latest'
-        working-directory: apps/desktop
-        run: |
-          pnpm -w cap-setup
-          pnpm tauri build --target ${{ matrix.settings.target }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
-        env:
-          RUST_TARGET_TRIPLE: ${{ matrix.settings.target }}
+          TAURI_ENV_TARGET_TRIPLE: ${{ matrix.settings.target }}
           TAURI_SIGNING_PRIVATE_KEY: ""
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
           
