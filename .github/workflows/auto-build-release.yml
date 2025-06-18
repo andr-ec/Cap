@@ -120,9 +120,10 @@ jobs:
         if: matrix.settings.runner == 'macos-latest'
         run: |
           mkdir -p artifacts
-          cd apps/desktop/src-tauri/target/${{ matrix.settings.target }}/release
-          if [ -f "cap" ]; then
-            cp cap "$GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}"
+          cd target/${{ matrix.settings.target }}/release
+          if [ -f "cap" ] || [ -f "Cap" ]; then
+            cp cap "$GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}" 2>/dev/null || true
+            cp Cap "$GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}" 2>/dev/null || true
           fi
           if [ -d "bundle" ]; then
             cp -r bundle/* "$GITHUB_WORKSPACE/artifacts/" 2>/dev/null || true
@@ -132,9 +133,12 @@ jobs:
         if: matrix.settings.runner == 'windows-latest'
         run: |
           mkdir artifacts
-          cd apps/desktop/src-tauri/target/${{ matrix.settings.target }}/release
+          cd target/${{ matrix.settings.target }}/release
           if (Test-Path "cap.exe") {
             Copy-Item "cap.exe" "$env:GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}.exe"
+          }
+          if (Test-Path "Cap.exe") {
+            Copy-Item "Cap.exe" "$env:GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}.exe"
           }
           if (Test-Path "bundle") {
             Copy-Item -Recurse "bundle/*" "$env:GITHUB_WORKSPACE/artifacts/" -ErrorAction SilentlyContinue

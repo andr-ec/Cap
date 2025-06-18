@@ -90,7 +90,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           mkdir -p artifacts
-          cd apps/desktop/src-tauri/target/${{ matrix.settings.target }}/release
+          cd target/${{ matrix.settings.target }}/release
           
           # Copy the binary
           if [ -f "cap" ]; then
@@ -112,7 +112,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           mkdir artifacts
-          cd apps/desktop/src-tauri/target/${{ matrix.settings.target }}/release
+          cd target/${{ matrix.settings.target }}/release
           
           # Copy the binary
           if (Test-Path "cap.exe") {
