@@ -154,14 +154,14 @@ jobs:
             chmod +x "$GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}"
           fi
           
-          # Create zip of .app bundle if it exists
+          # Create zip of .app bundle if it exists (with architecture suffix)
           if [ -d "bundle/macos" ]; then
-            find bundle/macos -name "*.app" -exec sh -c 'cd "$(dirname "{}")" && zip -r "$GITHUB_WORKSPACE/artifacts/$(basename "{}").zip" "$(basename "{}")"' \;
+            find bundle/macos -name "*.app" -exec sh -c 'cd "$(dirname "{}")" && zip -r "$GITHUB_WORKSPACE/artifacts/$(basename "{}")-${{ matrix.settings.target }}.zip" "$(basename "{}")"' \;
           fi
           
-          # Copy .dmg if it exists
+          # Copy .dmg if it exists (with architecture suffix)
           if [ -d "bundle/dmg" ]; then
-            find bundle/dmg -name "*.dmg" -exec cp {} "$GITHUB_WORKSPACE/artifacts/" \;
+            find bundle/dmg -name "*.dmg" -exec sh -c 'cp "{}" "$GITHUB_WORKSPACE/artifacts/$(basename "{}" .dmg)-${{ matrix.settings.target }}.dmg"' \;
           fi
           
       - name: Prepare artifacts (Windows)
@@ -178,17 +178,19 @@ jobs:
             Copy-Item "Cap.exe" "$env:GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}.exe"
           }
           
-          # Copy MSI installer if it exists
+          # Copy MSI installer if it exists (with architecture suffix)
           if (Test-Path "bundle/msi") {
             Get-ChildItem "bundle/msi/*.msi" | ForEach-Object {
-              Copy-Item $_.FullName "$env:GITHUB_WORKSPACE/artifacts/"
+              $newName = $_.BaseName + "-${{ matrix.settings.target }}" + $_.Extension
+              Copy-Item $_.FullName "$env:GITHUB_WORKSPACE/artifacts/$newName"
             }
           }
           
-          # Copy NSIS installer if it exists
+          # Copy NSIS installer if it exists (with architecture suffix)
           if (Test-Path "bundle/nsis") {
             Get-ChildItem "bundle/nsis/*.exe" | ForEach-Object {
-              Copy-Item $_.FullName "$env:GITHUB_WORKSPACE/artifacts/"
+              $newName = $_.BaseName + "-${{ matrix.settings.target }}" + $_.Extension
+              Copy-Item $_.FullName "$env:GITHUB_WORKSPACE/artifacts/$newName"
             }
           }
         shell: powershell
