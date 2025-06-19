@@ -18,6 +18,8 @@ jobs:
       
       - name: Sync upstream
         run: |
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
           git remote add upstream https://github.com/CapSoftware/Cap.git
           git fetch upstream --tags
           git checkout main
