@@ -55,7 +55,9 @@ jobs:
 
       - name: Create API Key File (macOS)
         if: matrix.settings.runner == 'macos-latest'
-        run: echo "${{ secrets.APPLE_API_KEY_FILE }}" > api.p8
+        run: |
+          echo "${{ secrets.APPLE_API_KEY_FILE }}" | base64 --decode > api.p8
+          chmod 600 api.p8
 
       - name: Import Apple certificates (macOS)
         if: matrix.settings.runner == 'macos-latest'
@@ -97,6 +99,15 @@ jobs:
           TAURI_ENV_TARGET_TRIPLE: ${{ matrix.settings.target }}
           TAURI_SIGNING_PRIVATE_KEY: ""
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          # Apple codesigning (macOS only)
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # Apple notarization (macOS only)
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ github.workspace }}/api.p8
+          APPLE_KEYCHAIN: ${{ runner.temp }}/build.keychain
           
       - name: Prepare artifacts (macOS)
         if: runner.os == 'macOS'
