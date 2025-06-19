@@ -144,12 +144,11 @@ jobs:
           mkdir -p artifacts
           cd target/${{ matrix.settings.target }}/release
           
-          # Copy the CLI binary if it exists
+          # Copy the CLI binary if it exists (check both possible names)
           if [ -f "cap" ]; then
             cp cap "$GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}"
             chmod +x "$GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}"
-          fi
-          if [ -f "Cap" ]; then
+          elif [ -f "Cap" ]; then
             cp Cap "$GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}"
             chmod +x "$GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}"
           fi
@@ -170,11 +169,10 @@ jobs:
           mkdir artifacts
           cd target/${{ matrix.settings.target }}/release
           
-          # Copy the CLI binary if it exists
+          # Copy the CLI binary if it exists (check both possible names)
           if (Test-Path "cap.exe") {
             Copy-Item "cap.exe" "$env:GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}.exe"
-          }
-          if (Test-Path "Cap.exe") {
+          } elseif (Test-Path "Cap.exe") {
             Copy-Item "Cap.exe" "$env:GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}.exe"
           }
           
