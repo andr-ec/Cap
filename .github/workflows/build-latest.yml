@@ -121,9 +121,9 @@ jobs:
             chmod +x "$GITHUB_WORKSPACE/artifacts/cap-${{ matrix.settings.target }}"
           fi
           
-          # Copy .app bundle if it exists
+          # Create zip of .app bundle if it exists
           if [ -d "bundle/macos" ]; then
-            find bundle/macos -name "*.app" -exec cp -r {} "$GITHUB_WORKSPACE/artifacts/" \;
+            find bundle/macos -name "*.app" -exec sh -c 'cd "$(dirname "{}")" && zip -r "$GITHUB_WORKSPACE/artifacts/$(basename "{}").zip" "$(basename "{}")"' \;
           fi
           
           # Copy .dmg if it exists
@@ -192,12 +192,12 @@ jobs:
           
       - name: List release artifacts (debug)
         run: |
-          echo "=== All artifacts downloaded for release ==="
-          find release-artifacts -type f -name "*" | head -20
+          echo "=== Artifact directories ==="
+          ls -la release-artifacts/
           echo "=== Total file count ==="
           find release-artifacts -type f | wc -l
-          echo "=== Files that will be uploaded ==="
-          find release-artifacts -name "*.dmg" -o -name "*.app" -o -name "*.exe" -o -name "*.msi" -o -name "cap-*" -o -name "Cap-*" | head -20
+          echo "=== App bundles and installers ==="
+          find release-artifacts -name "*.dmg" -o -name "*.zip" -o -name "*.exe" -o -name "*.msi" -o -name "cap-*" -o -name "Cap-*" 2>/dev/null || echo "No app files found"
         shell: bash
           
       - name: Create release
@@ -213,7 +213,7 @@ jobs:
             **Open Source Build** - Built from the latest source code
             
             ## 📦 Downloads
-            - **macOS**: Look for `.app` bundles or `.dmg` files
+            - **macOS**: Look for `.dmg` installers or `.zip` app bundles
             - **Windows**: Look for `.exe` or `.msi` installer files
             
             ## ℹ️ Build Info
@@ -225,7 +225,7 @@ jobs:
             > 🔓 No commercial license required for this build
           files: |
             release-artifacts/**/*.dmg
-            release-artifacts/**/*.app
+            release-artifacts/**/*.zip
             release-artifacts/**/*.exe
             release-artifacts/**/*.msi
             release-artifacts/**/cap-*
