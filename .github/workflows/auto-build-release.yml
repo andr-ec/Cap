@@ -266,8 +266,8 @@ jobs:
           files: |
             release-artifacts/**/*.dmg
             release-artifacts/**/*.zip
-            release-artifacts/**/*.exe
             release-artifacts/**/*.msi
+            release-artifacts/**/Cap_*-setup-*.exe
             release-artifacts/**/cap-*
           generate_release_notes: false
         env:

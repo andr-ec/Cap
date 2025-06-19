@@ -228,8 +228,8 @@ jobs:
           files: |
             release-artifacts/**/*.dmg
             release-artifacts/**/*.zip
-            release-artifacts/**/*.exe
             release-artifacts/**/*.msi
+            release-artifacts/**/Cap_*-setup-*.exe
             release-artifacts/**/cap-*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
