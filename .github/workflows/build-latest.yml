@@ -197,7 +197,7 @@ jobs:
           echo "=== Total file count ==="
           find release-artifacts -type f | wc -l
           echo "=== App bundles and installers ==="
-          find release-artifacts -name "*.dmg" -o -name "*.zip" -o -name "*.exe" -o -name "*.msi" -o -name "cap-*" -o -name "Cap-*" 2>/dev/null || echo "No app files found"
+          find release-artifacts -name "*.dmg" -o -name "*.zip" -o -name "*.exe" -o -name "*.msi" -o -name "cap-*" 2>/dev/null || echo "No app files found"
         shell: bash
           
       - name: Create release
@@ -229,6 +229,5 @@ jobs:
             release-artifacts/**/*.exe
             release-artifacts/**/*.msi
             release-artifacts/**/cap-*
-            release-artifacts/**/Cap-*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
