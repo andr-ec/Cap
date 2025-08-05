@@ -5,56 +5,38 @@ import { Button } from "@cap/ui";
 import { createVideoAndGetUploadUrl } from "@/actions/video/upload";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import {
-  getProgressCircleConfig,
-  calculateStrokeDashoffset,
-  getUploadStatus,
-  getDisplayProgress,
-  isUserOnProPlan,
-} from "@cap/utils";
 import { UpgradeModal } from "@/components/UpgradeModal";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faUpload } from "@fortawesome/free-solid-svg-icons";
 import { useDashboardContext } from "@/app/(org)/dashboard/Contexts";
+import { useUploadingContext } from "@/app/(org)/dashboard/caps/UploadingContext";
+import { userIsPro } from "@cap/utils";
 
 export const UploadCapButton = ({
   onStart,
   onProgress,
   onComplete,
   size = "md",
+  folderId,
 }: {
   onStart?: (id: string, thumbnail?: string) => void;
   onProgress?: (id: string, progress: number, uploadProgress?: number) => void;
   onComplete?: (id: string) => void;
   size?: "sm" | "lg" | "md";
+  grey?: boolean;
+  folderId?: string;
 }) => {
-  const { user, isSubscribed } = useDashboardContext();
+  const { user } = useDashboardContext();
   const inputRef = useRef<HTMLInputElement>(null);
-  const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState<number | undefined>(
-    undefined
-  );
-  const [processingProgress, setProcessingProgress] = useState(0);
+  const { isUploading, setIsUploading, setUploadProgress } =
+    useUploadingContext();
   const [upgradeModalOpen, setUpgradeModalOpen] = useState(false);
   const router = useRouter();
-
-  const { circumference } = getProgressCircleConfig();
-  const status = getUploadStatus(uploadProgress);
-  const displayProgress = getDisplayProgress(
-    uploadProgress,
-    processingProgress
-  );
-  const strokeDashoffset = calculateStrokeDashoffset(
-    displayProgress,
-    circumference
-  );
 
   const handleClick = () => {
     if (!user) return;
 
-    const isCapPro = isUserOnProPlan({
-      subscriptionStatus: user.stripeSubscriptionStatus,
-    });
+    const isCapPro = userIsPro(user);
 
     if (!isCapPro) {
       setUpgradeModalOpen(true);
@@ -68,9 +50,8 @@ export const UploadCapButton = ({
     const file = e.target.files?.[0];
     if (!file || !user) return;
 
-    setUploading(true);
-    setUploadProgress(undefined);
-    setProcessingProgress(0);
+    setIsUploading(true);
+    setUploadProgress(0);
     try {
       const parser = await import("@remotion/media-parser");
       const webcodecs = await import("@remotion/webcodecs");
@@ -99,9 +80,11 @@ export const UploadCapButton = ({
         audioCodec: "aac",
         isScreenshot: false,
         isUpload: true,
+        folderId,
       });
 
       const uploadId = videoData.id;
+      // Initial start with thumbnail as undefined
       onStart?.(uploadId);
       onProgress?.(uploadId, 10);
 
@@ -140,7 +123,6 @@ export const UploadCapButton = ({
           onProgress: ({ overallProgress }) => {
             if (overallProgress !== null) {
               const progressValue = overallProgress * 100;
-              setProcessingProgress(progressValue);
               onProgress?.(uploadId, progressValue);
             }
           },
@@ -304,6 +286,7 @@ export const UploadCapButton = ({
         ? URL.createObjectURL(thumbnailBlob)
         : undefined;
 
+      // Pass the thumbnail URL to the parent component
       onStart?.(uploadId, thumbnailUrl);
       onProgress?.(uploadId, 100);
 
@@ -390,9 +373,8 @@ export const UploadCapButton = ({
     } catch (err) {
       console.error("Video upload failed", err);
     } finally {
-      setUploading(false);
-      setUploadProgress(undefined);
-      setProcessingProgress(0);
+      setIsUploading(false);
+      setUploadProgress(0);
       if (inputRef.current) inputRef.current.value = "";
     }
   };
@@ -401,14 +383,14 @@ export const UploadCapButton = ({
     <>
       <Button
         onClick={handleClick}
-        disabled={uploading}
+        disabled={isUploading}
         variant="dark"
         className="flex gap-2 items-center"
         size={size}
-        spinner={uploading}
+        spinner={isUploading}
       >
         <FontAwesomeIcon className="size-3.5" icon={faUpload} />
-        Upload Video
+        {isUploading ? "Uploading..." : "Upload Video"}
       </Button>
       <input
         ref={inputRef}

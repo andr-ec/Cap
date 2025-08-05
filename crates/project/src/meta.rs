@@ -4,12 +4,13 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::{
     collections::HashMap,
+    error::Error,
     path::{Path, PathBuf},
 };
 use tracing::{debug, info, warn};
 // use tracing::{debug, warn};
 
-use crate::{CaptionsData, CursorEvents, CursorImage, CursorImages, ProjectConfiguration, XY};
+use crate::{CaptionsData, CursorEvents, CursorImage, ProjectConfiguration, XY};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct VideoMeta {
@@ -59,6 +60,7 @@ impl Default for Platform {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct RecordingMeta {
+    #[serde(default)]
     pub platform: Option<Platform>,
     // this field is just for convenience, it shouldn't be persisted
     #[serde(skip_serializing, default)]
@@ -89,11 +91,9 @@ impl RecordingMeta {
     pub fn path(&self, relative: &RelativePathBuf) -> PathBuf {
         relative.to_path(&self.project_path)
     }
-    pub fn load_for_project(project_path: &PathBuf) -> Result<Self, String> {
+    pub fn load_for_project(project_path: &PathBuf) -> Result<Self, Box<dyn Error>> {
         let meta_path = project_path.join("recording-meta.json");
-        let mut meta: Self =
-            serde_json::from_str(&std::fs::read_to_string(&meta_path).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
+        let mut meta: Self = serde_json::from_str(&std::fs::read_to_string(&meta_path)?)?;
         meta.project_path = project_path.clone();
 
         Ok(meta)
@@ -243,6 +243,8 @@ pub struct CursorMeta {
     #[specta(type = String)]
     pub image_path: RelativePathBuf,
     pub hotspot: XY<f64>,
+    #[serde(default)]
+    pub hash: Option<String>,
 }
 
 impl MultipleSegments {
@@ -250,22 +252,17 @@ impl MultipleSegments {
         meta.project_path.join(path)
     }
 
-    pub fn cursor_images(&self, meta: &RecordingMeta) -> Result<CursorImages, CursorImage> {
-        Ok(CursorImages(match &self.cursors {
-            Cursors::Old(_) => Default::default(),
-            Cursors::Correct(map) => map
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        CursorImage {
-                            path: meta.path(&v.image_path),
-                            hotspot: v.hotspot,
-                        },
-                    )
+    pub fn get_cursor_image(&self, meta: &RecordingMeta, id: &str) -> Option<CursorImage> {
+        match &self.cursors {
+            Cursors::Old(_) => None,
+            Cursors::Correct(map) => {
+                let cursor = map.get(id)?;
+                Some(CursorImage {
+                    path: meta.path(&cursor.image_path),
+                    hotspot: cursor.hotspot,
                 })
-                .collect::<_>(),
-        }))
+            }
+        }
     }
 }
 
@@ -294,7 +291,6 @@ impl MultipleSegment {
         };
 
         let full_path = meta.path(cursor_path);
-        println!("Loading cursor data from: {:?}", full_path);
 
         // Try to load the cursor data
         match CursorEvents::load_from_file(&full_path) {

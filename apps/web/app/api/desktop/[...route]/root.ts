@@ -1,14 +1,14 @@
-import { buildEnv, serverEnv } from "@cap/env";
-import { Hono } from "hono";
-import { zValidator } from "@hono/zod-validator";
-import { z } from "zod";
-import { isUserOnProPlan, stripe } from "@cap/utils";
 import { db } from "@cap/database";
-import { users } from "@cap/database/schema";
+import { organizations, users } from "@cap/database/schema";
+import { buildEnv, serverEnv } from "@cap/env";
+import { stripe, userIsPro } from "@cap/utils";
+import { zValidator } from "@hono/zod-validator";
 import { eq } from "drizzle-orm";
+import { Hono } from "hono";
 import * as crypto from "node:crypto";
-import { withAuth } from "../../utils";
 import { PostHog } from "posthog-node";
+import { z } from "zod";
+import { withAuth } from "../../utils";
 
 export const app = new Hono().use(withAuth);
 
@@ -59,12 +59,43 @@ app.post(
   }
 );
 
+app.get("/org-custom-domain", async (c) => {
+  const user = c.get("user");
+
+  try {
+    const [result] = await db()
+      .select({
+        customDomain: organizations.customDomain,
+        domainVerified: organizations.domainVerified,
+      })
+      .from(users)
+      .leftJoin(organizations, eq(users.activeOrganizationId, organizations.id))
+      .where(eq(users.id, user.id));
+
+    // Ensure custom domain has https:// prefix
+    let customDomain = result?.customDomain ?? null;
+    if (
+      customDomain &&
+      !customDomain.startsWith("http://") &&
+      !customDomain.startsWith("https://")
+    ) {
+      customDomain = `https://${customDomain}`;
+    }
+
+    return c.json({
+      custom_domain: customDomain,
+      domain_verified: result?.domainVerified ?? null,
+    });
+  } catch (error) {
+    console.error("[GET] Error fetching custom domain:", error);
+    return c.json({ error: "Failed to fetch custom domain" }, { status: 500 });
+  }
+});
+
 app.get("/plan", async (c) => {
   const user = c.get("user");
 
-  let isSubscribed = isUserOnProPlan({
-    subscriptionStatus: user.stripeSubscriptionStatus,
-  });
+  let isSubscribed = userIsPro(user);
 
   if (user.thirdPartyStripeSubscriptionId) {
     isSubscribed = true;
@@ -116,9 +147,7 @@ app.post(
     const { priceId } = c.req.valid("json");
     const user = c.get("user");
 
-    if (
-      isUserOnProPlan({ subscriptionStatus: user.stripeSubscriptionStatus })
-    ) {
+    if (userIsPro(user)) {
       console.log("[POST] Error: User already on Pro plan");
       return c.json({ error: true, subscription: true }, { status: 400 });
     }
@@ -149,7 +178,7 @@ app.post(
       success_url: `${serverEnv().WEB_URL}/dashboard/caps?upgrade=true`,
       cancel_url: `${serverEnv().WEB_URL}/pricing`,
       allow_promotion_codes: true,
-      metadata: { platform: "desktop" },
+      metadata: { platform: "desktop", dubCustomerId: user.id },
     });
 
     if (checkoutSession.url) {

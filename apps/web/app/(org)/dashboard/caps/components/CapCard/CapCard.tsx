@@ -7,8 +7,8 @@ import { VideoMetadata } from "@cap/database/types";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@cap/ui";
 import {
   faCheck,
-  faEllipsis,
-  faLock,
+  faCopy,
+  faEllipsis, faLock,
   faTrash,
   faUnlock,
   faVideo
@@ -24,6 +24,7 @@ import { SharingDialog } from "../SharingDialog";
 import { CapCardAnalytics } from "./CapCardAnalytics";
 import { CapCardButtons } from "./CapCardButtons";
 import { CapCardContent } from "./CapCardContent";
+import { duplicateVideo } from "@/actions/videos/duplicate";
 
 
 
@@ -51,13 +52,18 @@ export interface CapCardProps extends PropsWithChildren {
     hasPassword?: boolean;
   };
   analytics: number;
-  onDelete?: (videoId: string) => Promise<void>;
+  onDelete?: () => Promise<void>;
   userId?: string;
   sharedCapCard?: boolean;
   isSelected?: boolean;
   onSelectToggle?: () => void;
+  customDomain?: string | null;
+  domainVerified?: boolean;
   hideSharedStatus?: boolean;
   anyCapSelected?: boolean;
+  isDeleting?: boolean;
+  onDragStart?: () => void;
+  onDragEnd?: () => void;
 }
 
 export const CapCard = ({
@@ -68,9 +74,12 @@ export const CapCard = ({
   userId,
   sharedCapCard = false,
   hideSharedStatus = false,
+  customDomain,
+  domainVerified,
   isSelected = false,
   onSelectToggle,
   anyCapSelected = false,
+  isDeleting = false,
 }: CapCardProps) => {
   const [isSharingDialogOpen, setIsSharingDialogOpen] = useState(false);
   const [isPasswordDialogOpen, setIsPasswordDialogOpen] = useState(false);
@@ -84,11 +93,6 @@ export const CapCard = ({
   const router = useRouter();
   const { isSubscribed, setUpgradeModalOpen } = useDashboardContext();
 
-  const displayCount =
-    analytics === 0
-      ? Math.max(cap.totalComments, cap.totalReactions)
-      : analytics;
-
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [removing, setRemoving] = useState(false);
 
@@ -99,10 +103,15 @@ export const CapCard = ({
 
   const confirmRemoveCap = async () => {
     if (!onDelete) return;
-    setRemoving(true);
-    await onDelete(cap.id);
-    setRemoving(false);
-    setConfirmOpen(false);
+    try {
+      setRemoving(true);
+      await onDelete();
+    } catch (error) {
+      console.error("Error deleting cap:", error);
+    } finally {
+      setRemoving(false);
+      setConfirmOpen(false);
+    }
   };
 
   const handleSharingUpdated = () => {
@@ -116,9 +125,29 @@ export const CapCard = ({
 
   const isOwner = userId === cap.ownerId;
 
+  // Helper function to create a drag preview element
+  const createDragPreview = (text: string): HTMLElement => {
+    // Create the element
+    const element = document.createElement('div');
+
+    // Add text content
+    element.textContent = text;
+
+    // Apply Tailwind-like styles directly
+    element.className = 'px-2 py-1.5 text-sm font-medium rounded-lg shadow-md text-gray-1 bg-gray-12';
+
+    // Position off-screen
+    element.style.position = 'absolute';
+    element.style.top = '-9999px';
+    element.style.left = '-9999px';
+
+    return element;
+  };
+
   const handleDragStart = (e: React.DragEvent<HTMLDivElement>) => {
     if (anyCapSelected || !isOwner) return;
 
+    // Set the data transfer
     e.dataTransfer.setData(
       "application/cap",
       JSON.stringify({
@@ -127,24 +156,22 @@ export const CapCard = ({
       })
     );
 
-    setIsDragging(true);
+    // Set drag effect to 'move' to avoid showing the + icon
+    e.dataTransfer.effectAllowed = 'move';
 
-    // Create a smaller drag image
-    const dragImage = new Image();
-    dragImage.src = `https://cap-api-thumbnails.s3.us-west-2.amazonaws.com/${cap.id}/thumbnail.png`;
-    dragImage.onload = () => {
-      const canvas = document.createElement("canvas");
-      canvas.width = 100;
-      canvas.height = 60;
-      const ctx = canvas.getContext("2d");
-      if (ctx) {
-        ctx.drawImage(dragImage, 0, 0, 100, 60);
-        const dataURL = canvas.toDataURL();
-        const img = new Image();
-        img.src = dataURL;
-        e.dataTransfer.setDragImage(img, 50, 30);
-      }
-    };
+    // Set the drag image using the helper function
+    try {
+      const dragPreview = createDragPreview(cap.name);
+      document.body.appendChild(dragPreview);
+      e.dataTransfer.setDragImage(dragPreview, 10, 10);
+
+      // Clean up after a short delay
+      setTimeout(() => document.body.removeChild(dragPreview), 100);
+    } catch (error) {
+      console.error('Error setting drag image:', error);
+    }
+
+    setIsDragging(true);
   };
 
   const handleDragEnd = () => {
@@ -243,7 +270,7 @@ export const CapCard = ({
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
         className={clsx(
-          "flex relative flex-col gap-4 w-full h-full rounded-xl cursor-default bg-gray-1 border-gray-3 group border-px",
+          "flex relative transition-colors duration-200 flex-col gap-4 w-full h-full rounded-xl cursor-default bg-gray-1 border border-gray-3 group border-px",
           isSelected
             ? "!border-blue-10 border-px"
             : anyCapSelected
@@ -275,6 +302,8 @@ export const CapCard = ({
               capId={cap.id}
               copyPressed={copyPressed}
               isDownloading={isDownloading}
+              customDomain={customDomain}
+              domainVerified={domainVerified}
               handleCopy={handleCopy}
               handleDownload={handleDownload}
             />
@@ -303,7 +332,24 @@ export const CapCard = ({
                 sideOffset={5}
               >
                 <DropdownMenuItem
-                  onClick={(e) => {
+                  onClick={async () => {
+                    try {
+                      await duplicateVideo(cap.id)
+                      toast.success("Cap duplicated successfully");
+                    } catch (error) {
+                      toast.error("Failed to duplicate cap");
+                    }
+                  }}
+                  className="flex gap-2 items-center rounded-lg"
+                >
+                  <FontAwesomeIcon
+                    className="size-3"
+                    icon={faCopy}
+                  />
+                  <p className="text-sm text-gray-12">Duplicate</p>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => {
                     if (!isSubscribed) {
                       setUpgradeModalOpen(true);
                     } else {
@@ -374,6 +420,11 @@ export const CapCard = ({
             "block group",
             anyCapSelected && "cursor-pointer pointer-events-none"
           )}
+          onClick={(e) => {
+            if (isDeleting) {
+              e.preventDefault();
+            }
+          }}
           href={`/s/${cap.id}`}
         >
           <VideoThumbnail
@@ -403,7 +454,7 @@ export const CapCard = ({
           {children}
           <CapCardAnalytics
             capId={cap.id}
-            displayCount={displayCount}
+            displayCount={analytics}
             totalComments={cap.totalComments}
             totalReactions={cap.totalReactions}
           />
