@@ -1,28 +1,42 @@
+import { db } from "@cap/database";
 import { getCurrentUser } from "@cap/database/auth/session";
-import { Metadata } from "next";
+import { organizationMembers, organizations } from "@cap/database/schema";
+import { and, eq } from "drizzle-orm";
+import type { Metadata } from "next";
 import { redirect } from "next/navigation";
-import { getDashboardData } from "../../dashboard-data";
 import { Organization } from "./Organization";
 
 export const metadata: Metadata = {
-  title: "Organization Settings — Cap",
+	title: "Organization Settings — Cap",
 };
 
 export default async function OrganizationPage() {
-  const user = await getCurrentUser();
+	const user = await getCurrentUser();
 
-  if (!user) {
-    redirect("/auth/signin");
-  }
+	if (!user) {
+		redirect("/auth/signin");
+	}
 
-  const dashboardData = await getDashboardData(user);
-  const isOwner = dashboardData.organizationSelect.find(
-    (organization) => organization.organization.ownerId === user.id
-  );
+	const [member] = await db()
+		.select({
+			role: organizationMembers.role,
+		})
+		.from(organizationMembers)
+		.limit(1)
+		.leftJoin(
+			organizations,
+			eq(organizationMembers.organizationId, organizations.id),
+		)
+		.where(
+			and(
+				eq(organizationMembers.userId, user.id),
+				eq(organizations.id, user.activeOrganizationId),
+			),
+		);
 
-  if (!isOwner) {
-    redirect("/dashboard/caps");
-  }
+	if (!member || member.role !== "owner") {
+		redirect("/dashboard/caps");
+	}
 
-  return <Organization />;
+	return <Organization />;
 }

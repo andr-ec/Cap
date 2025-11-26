@@ -20,7 +20,7 @@ impl DisplayLayer {
 
         let uniforms_buffer = CompositeVideoFrameUniforms::default().to_buffer(device);
         let pipeline = CompositeVideoFramePipeline::new(device);
-        let bind_group = Some(pipeline.bind_group(&device, &uniforms_buffer, &frame_texture_view));
+        let bind_group = Some(pipeline.bind_group(device, &uniforms_buffer, &frame_texture_view));
 
         Self {
             frame_texture_view,
@@ -49,7 +49,7 @@ impl DisplayLayer {
             self.frame_texture_view = self.frame_texture.create_view(&Default::default());
 
             self.bind_group = Some(self.pipeline.bind_group(
-                &device,
+                device,
                 &self.uniforms_buffer,
                 &self.frame_texture_view,
             ));
@@ -62,7 +62,7 @@ impl DisplayLayer {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &segment_frames.screen_frame,
+            segment_frames.screen_frame.data(),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(frame_size.x * 4),
@@ -75,7 +75,8 @@ impl DisplayLayer {
             },
         );
 
-        queue.write_buffer(&self.uniforms_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+        // Update existing uniform buffer in place; bind group remains valid.
+        uniforms.write_to_buffer(queue, &self.uniforms_buffer);
     }
 
     pub fn render(&self, pass: &mut wgpu::RenderPass<'_>) {

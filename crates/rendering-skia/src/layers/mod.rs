@@ -11,6 +11,7 @@ pub use background::BackgroundLayer;
 pub struct SkiaProjectUniforms {
     pub output_size: (u32, u32),
     pub background: cap_project::BackgroundSource,
+    pub border: Option<cap_project::BorderConfiguration>,
     // Add more fields as needed
 }
 
@@ -182,10 +183,10 @@ impl LayerStack {
                     }
                 }
                 LayerEntry::Surface(layer) => {
-                    if layer.is_enabled() {
-                        if let Some(picture) = layer.render_to_surface(uniforms) {
-                            layer.composite(canvas, &picture, uniforms);
-                        }
+                    if layer.is_enabled()
+                        && let Some(picture) = layer.render_to_surface(uniforms)
+                    {
+                        layer.composite(canvas, &picture, uniforms);
                     }
                 }
             }

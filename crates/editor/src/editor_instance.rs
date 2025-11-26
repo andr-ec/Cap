@@ -1,24 +1,20 @@
 use crate::editor;
-use crate::playback::{self, PlaybackHandle};
+use crate::playback::{self, PlaybackHandle, PlaybackStartError};
 use cap_audio::AudioData;
-// use cap_media::feeds::AudioData;
-use cap_media::frame_ws::create_frame_ws;
+use cap_project::StudioRecordingMeta;
 use cap_project::{CursorEvents, ProjectConfiguration, RecordingMeta, RecordingMetaInner, XY};
-use cap_project::{RecordingConfig, StudioRecordingMeta};
 use cap_rendering::{
-    get_duration, ProjectRecordingsMeta, ProjectUniforms, RecordingSegmentDecoders, RenderOptions,
-    RenderVideoConstants, SegmentVideoPaths,
+    ProjectRecordingsMeta, ProjectUniforms, RecordingSegmentDecoders, RenderVideoConstants,
+    RenderedFrame, SegmentVideoPaths, get_duration,
 };
 use std::ops::Deref;
-use std::sync::Mutex as StdMutex;
 use std::{path::PathBuf, sync::Arc};
-use tokio::sync::{mpsc, watch, Mutex};
-use tokio_util::sync::CancellationToken;
-use tracing::trace;
+use tokio::sync::{Mutex, watch};
+use tracing::{trace, warn};
 
 pub struct EditorInstance {
     pub project_path: PathBuf,
-    pub ws_port: u16,
+    // pub ws_port: u16,
     pub recordings: Arc<ProjectRecordingsMeta>,
     pub renderer: Arc<editor::RendererHandle>,
     pub render_constants: Arc<RenderVideoConstants>,
@@ -29,8 +25,8 @@ pub struct EditorInstance {
         watch::Sender<ProjectConfiguration>,
         watch::Receiver<ProjectConfiguration>,
     ),
-    ws_shutdown_token: CancellationToken,
-    pub segments: Arc<Vec<Segment>>,
+    // ws_shutdown_token: CancellationToken,
+    pub segment_medias: Arc<Vec<SegmentMedia>>,
     meta: RecordingMeta,
 }
 
@@ -38,11 +34,8 @@ impl EditorInstance {
     pub async fn new(
         project_path: PathBuf,
         on_state_change: impl Fn(&EditorState) + Send + Sync + 'static,
+        frame_cb: Box<dyn FnMut(RenderedFrame) + Send>,
     ) -> Result<Arc<Self>, String> {
-        sentry::configure_scope(|scope| {
-            scope.set_tag("crate", "editor");
-        });
-
         if !project_path.exists() {
             println!("Video path {} not found!", project_path.display());
             panic!("Video path {} not found!", project_path.display());
@@ -60,10 +53,6 @@ impl EditorInstance {
 
         let segments = create_segments(&recording_meta, meta).await?;
 
-        let (frame_tx, frame_rx) = flume::bounded(4);
-
-        let (ws_port, ws_shutdown_token) = create_frame_ws(frame_rx).await;
-
         let render_constants = Arc::new(
             RenderVideoConstants::new(&recordings.segments, recording_meta.clone(), meta.clone())
                 .await
@@ -72,7 +61,7 @@ impl EditorInstance {
 
         let renderer = Arc::new(editor::Renderer::spawn(
             render_constants.clone(),
-            frame_tx,
+            frame_cb,
             &recording_meta,
             meta,
         )?);
@@ -82,7 +71,6 @@ impl EditorInstance {
         let this = Arc::new(Self {
             project_path,
             recordings,
-            ws_port,
             renderer,
             render_constants,
             state: Arc::new(Mutex::new(EditorState {
@@ -93,8 +81,7 @@ impl EditorInstance {
             on_state_change: Box::new(on_state_change),
             preview_tx,
             project_config: watch::channel(project),
-            ws_shutdown_token,
-            segments: Arc::new(segments),
+            segment_medias: Arc::new(segments),
             meta: recording_meta,
         });
 
@@ -125,10 +112,6 @@ impl EditorInstance {
             task.abort();
             task.await.ok(); // Await the task to ensure it's fully stopped
         }
-
-        // Stop WebSocket server
-        trace!("Shutting down WebSocket server");
-        self.ws_shutdown_token.cancel();
 
         // Stop renderer
         trace!("Stopping renderer");
@@ -162,15 +145,22 @@ impl EditorInstance {
 
             let start_frame_number = state.playhead_position;
 
-            let playback_handle = playback::Playback {
-                segments: self.segments.clone(),
+            let playback_handle = match (playback::Playback {
+                segment_medias: self.segment_medias.clone(),
                 renderer: self.renderer.clone(),
                 render_constants: self.render_constants.clone(),
                 start_frame_number,
                 project: self.project_config.0.subscribe(),
-            }
+            })
             .start(fps, resolution_base)
-            .await;
+            .await
+            {
+                Ok(handle) => handle,
+                Err(PlaybackStartError::InvalidFps) => {
+                    warn!(fps, "Skipping playback start due to invalid FPS");
+                    return;
+                }
+            };
 
             let prev = state.playback_task.replace(playback_handle.clone());
 
@@ -217,17 +207,22 @@ impl EditorInstance {
 
                 let project = self.project_config.1.borrow().clone();
 
-                let Some((segment_time, segment_i)) =
+                let Some((segment_time, segment)) =
                     project.get_segment_time(frame_number as f64 / fps as f64)
                 else {
                     continue;
                 };
 
-                let segment = &self.segments[segment_i as usize];
+                let segment_medias = &self.segment_medias[segment.recording_clip as usize];
+                let clip_config = project
+                    .clips
+                    .iter()
+                    .find(|v| v.index == segment.recording_clip);
+                let clip_offsets = clip_config.map(|v| v.offsets).unwrap_or_default();
 
-                if let Some(segment_frames) = segment
+                if let Some(segment_frames) = segment_medias
                     .decoders
-                    .get_frames(segment_time as f32, !project.camera.hide)
+                    .get_frames(segment_time as f32, !project.camera.hide, clip_offsets)
                     .await
                 {
                     let uniforms = ProjectUniforms::new(
@@ -236,11 +231,11 @@ impl EditorInstance {
                         frame_number,
                         fps,
                         resolution_base,
-                        &segment.cursor,
+                        &segment_medias.cursor,
                         &segment_frames,
                     );
                     self.renderer
-                        .render_frame(segment_frames, uniforms, segment.cursor.clone())
+                        .render_frame(segment_frames, uniforms, segment_medias.cursor.clone())
                         .await;
                 }
             }
@@ -249,7 +244,7 @@ impl EditorInstance {
 
     fn get_studio_meta(&self) -> &StudioRecordingMeta {
         match &self.meta.inner {
-            RecordingMetaInner::Studio(meta) => &meta,
+            RecordingMetaInner::Studio(meta) => meta,
             _ => panic!("Not a studio recording"),
         }
     }
@@ -286,7 +281,7 @@ pub struct EditorState {
     pub preview_task: Option<tokio::task::JoinHandle<()>>,
 }
 
-pub struct Segment {
+pub struct SegmentMedia {
     pub audio: Option<Arc<AudioData>>,
     pub system_audio: Option<Arc<AudioData>>,
     pub cursor: Arc<CursorEvents>,
@@ -296,7 +291,7 @@ pub struct Segment {
 pub async fn create_segments(
     recording_meta: &RecordingMeta,
     meta: &StudioRecordingMeta,
-) -> Result<Vec<Segment>, String> {
+) -> Result<Vec<SegmentMedia>, String> {
     match &meta {
         cap_project::StudioRecordingMeta::SingleSegment { segment: s } => {
             let audio = s
@@ -310,7 +305,7 @@ pub async fn create_segments(
                 .map(Arc::new);
 
             let decoders = RecordingSegmentDecoders::new(
-                &recording_meta,
+                recording_meta,
                 meta,
                 SegmentVideoPaths {
                     display: recording_meta.path(&s.display.path),
@@ -321,7 +316,7 @@ pub async fn create_segments(
             .await
             .map_err(|e| format!("SingleSegment / {e}"))?;
 
-            Ok(vec![Segment {
+            Ok(vec![SegmentMedia {
                 audio,
                 system_audio: None,
                 cursor: Default::default(),
@@ -352,10 +347,10 @@ pub async fn create_segments(
                     .transpose()?
                     .map(Arc::new);
 
-                let cursor = Arc::new(s.cursor_events(&recording_meta));
+                let cursor = Arc::new(s.cursor_events(recording_meta));
 
                 let decoders = RecordingSegmentDecoders::new(
-                    &recording_meta,
+                    recording_meta,
                     meta,
                     SegmentVideoPaths {
                         display: recording_meta.path(&s.display.path),
@@ -366,7 +361,7 @@ pub async fn create_segments(
                 .await
                 .map_err(|e| format!("MultipleSegments {i} / {e}"))?;
 
-                segments.push(Segment {
+                segments.push(SegmentMedia {
                     audio,
                     system_audio,
                     cursor,

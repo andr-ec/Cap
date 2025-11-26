@@ -1,72 +1,80 @@
 "use server";
 
+import { db } from "@cap/database";
 import { getCurrentUser } from "@cap/database/auth/session";
 import { organizations } from "@cap/database/schema";
-import { db } from "@cap/database";
+import { userIsPro } from "@cap/utils";
+import type { Organisation } from "@cap/web-domain";
 import { eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { addDomain, checkDomainStatus } from "./domain-utils";
 
-export async function updateDomain(domain: string, organizationId: string) {
-  const user = await getCurrentUser();
+export async function updateDomain(
+	domain: string,
+	organizationId: Organisation.OrganisationId,
+) {
+	const user = await getCurrentUser();
 
-  if (!user) {
-    throw new Error("Unauthorized");
-  }
+	if (!user) {
+		throw new Error("Unauthorized");
+	}
 
-  const [organization] = await db()
-    .select()
-    .from(organizations)
-    .where(eq(organizations.id, organizationId));
+	if (!userIsPro(user)) {
+		throw new Error("User is not subscribed");
+	}
 
-  if (!organization || organization.ownerId !== user.id) {
-    throw new Error("Only the owner can update the custom domain");
-  }
+	const [organization] = await db()
+		.select()
+		.from(organizations)
+		.where(eq(organizations.id, organizationId));
 
-  // Check if domain is already being used by another organization
-  const existingDomain = await db()
-    .select()
-    .from(organizations)
-    .where(eq(organizations.customDomain, domain))
-    .limit(1);
+	if (!organization || organization.ownerId !== user.id) {
+		throw new Error("Only the owner can update the custom domain");
+	}
 
-  if (existingDomain.length > 0 && existingDomain[0]?.id !== organizationId) {
-    throw new Error("This domain is already being used.");
-  }
+	// Check if domain is already being used by another organization
+	const existingDomain = await db()
+		.select()
+		.from(organizations)
+		.where(eq(organizations.customDomain, domain))
+		.limit(1);
 
-  try {
-    const addDomainResponse = await addDomain(domain);
+	if (existingDomain.length > 0 && existingDomain[0]?.id !== organizationId) {
+		throw new Error("This domain is already being used.");
+	}
 
-    if (addDomainResponse.error) {
-      throw new Error(addDomainResponse.error.message);
-    }
+	try {
+		const addDomainResponse = await addDomain(domain);
 
-    await db()
-      .update(organizations)
-      .set({
-        customDomain: domain,
-        domainVerified: null,
-      })
-      .where(eq(organizations.id, organizationId));
+		if (addDomainResponse.error) {
+			throw new Error(addDomainResponse.error.message);
+		}
 
-    const status = await checkDomainStatus(domain);
+		await db()
+			.update(organizations)
+			.set({
+				customDomain: domain,
+				domainVerified: null,
+			})
+			.where(eq(organizations.id, organizationId));
 
-    if (status.verified) {
-      await db()
-        .update(organizations)
-        .set({
-          domainVerified: new Date(),
-        })
-        .where(eq(organizations.id, organizationId));
-    }
+		const status = await checkDomainStatus(domain);
 
-    revalidatePath("/dashboard/settings/organization");
+		if (status.verified) {
+			await db()
+				.update(organizations)
+				.set({
+					domainVerified: new Date(),
+				})
+				.where(eq(organizations.id, organizationId));
+		}
 
-    return status;
-  } catch (error) {
-    if (error instanceof Error) {
-      throw new Error(error.message);
-    }
-    throw new Error("Failed to update domain");
-  }
+		revalidatePath("/dashboard/settings/organization");
+
+		return status;
+	} catch (error) {
+		if (error instanceof Error) {
+			throw new Error(error.message);
+		}
+	}
 }

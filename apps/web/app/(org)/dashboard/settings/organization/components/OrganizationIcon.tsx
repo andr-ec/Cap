@@ -1,81 +1,98 @@
 "use client";
 
-import { removeOrganizationIcon } from "@/actions/organization/remove-icon";
-import { uploadOrganizationIcon } from "@/actions/organization/upload-organization-icon";
-import { FileInput } from "@/components/FileInput";
 import { CardDescription, Label } from "@cap/ui";
-import { useState } from "react";
+import type { Organisation } from "@cap/web-domain";
+import { Effect, Option } from "effect";
+import { useRouter } from "next/navigation";
+import { useId } from "react";
 import { toast } from "sonner";
+import { FileInput } from "@/components/FileInput";
+import { useEffectMutation, useRpcClient } from "@/lib/EffectRuntime";
 import { useDashboardContext } from "../../../Contexts";
 
 export const OrganizationIcon = () => {
-  const { activeOrganization } = useDashboardContext();
-  const organizationId = activeOrganization?.organization.id;
-  const existingIconUrl = activeOrganization?.organization.iconUrl;
+	const router = useRouter();
+	const iconInputId = useId();
+	const { activeOrganization } = useDashboardContext();
+	const organizationId = activeOrganization?.organization.id;
+	const existingIconUrl = activeOrganization?.organization.iconUrl ?? null;
 
-  const [isUploading, setIsUploading] = useState(false);
+	const rpc = useRpcClient();
 
-  const handleFileChange = async (file: File | null) => {
-    // If file is null, it means the user removed the file
-    if (!file || !organizationId) return;
+	const uploadIcon = useEffectMutation({
+		mutationFn: Effect.fn(function* ({
+			file,
+			organizationId,
+		}: {
+			organizationId: Organisation.OrganisationId;
+			file: File;
+		}) {
+			const arrayBuffer = yield* Effect.promise(() => file.arrayBuffer());
 
-    // Upload the file to the server immediately
-    try {
-      setIsUploading(true);
-      const formData = new FormData();
-      formData.append("file", file);
+			yield* rpc.OrganisationUpdate({
+				id: organizationId,
+				image: Option.some({
+					contentType: file.type,
+					fileName: file.name,
+					data: new Uint8Array(arrayBuffer),
+				}),
+			});
+		}),
+		onSuccess: () => {
+			toast.success("Organization icon updated successfully");
+			router.refresh();
+		},
+		onError: (error) => {
+			toast.error(
+				error instanceof Error ? error.message : "Failed to upload icon",
+			);
+		},
+	});
 
-      const result = await uploadOrganizationIcon(formData, organizationId);
+	const removeIcon = useEffectMutation({
+		mutationFn: (organizationId: Organisation.OrganisationId) =>
+			rpc.OrganisationUpdate({
+				id: organizationId,
+				image: Option.none(),
+			}),
+		onSuccess: () => {
+			toast.success("Organization icon removed successfully");
+			router.refresh();
+		},
+		onError: (error) => {
+			console.error("Error removing organization icon:", error);
+			toast.error(
+				error instanceof Error ? error.message : "Failed to remove icon",
+			);
+		},
+	});
 
-      if (result.success) {
-        toast.success("Organization icon updated successfully");
-      }
-    } catch (error) {
-      console.error("Error uploading organization icon:", error);
-      toast.error(
-        error instanceof Error ? error.message : "Failed to upload icon"
-      );
-    } finally {
-      setIsUploading(false);
-    }
-  };
-
-  const handleRemoveIcon = async () => {
-    if (!organizationId) return;
-
-    try {
-      const result = await removeOrganizationIcon(organizationId);
-
-      if (result.success) {
-        toast.success("Organization icon removed successfully");
-      }
-    } catch (error) {
-      console.error("Error removing organization icon:", error);
-      toast.error(
-        error instanceof Error ? error.message : "Failed to remove icon"
-      );
-    }
-  };
-
-  return (
-    <div className="space-y-4">
-      <div className="space-y-1">
-        <Label htmlFor="icon">Organization Icon</Label>
-        <CardDescription className="w-full">
-          Upload a custom logo or icon for your organization and make it unique.
-        </CardDescription>
-      </div>
-      <FileInput
-        height={62}
-        previewIconSize={32}
-        id="icon"
-        name="icon"
-        onChange={handleFileChange}
-        disabled={isUploading}
-        isLoading={isUploading}
-        initialPreviewUrl={existingIconUrl || null}
-        onRemove={handleRemoveIcon}
-      />
-    </div>
-  );
+	return (
+		<div className="flex-1 space-y-4">
+			<div className="space-y-1">
+				<Label htmlFor="icon">Organization Icon</Label>
+				<CardDescription className="w-full">
+					Upload a custom logo or icon for your organization.
+				</CardDescription>
+			</div>
+			<FileInput
+				height={44}
+				previewIconSize={20}
+				id={iconInputId}
+				name="icon"
+				onChange={(file) => {
+					if (!file || !organizationId) return;
+					uploadIcon.mutate({ organizationId, file });
+				}}
+				disabled={uploadIcon.isPending}
+				isLoading={uploadIcon.isPending}
+				initialPreviewUrl={existingIconUrl}
+				onRemove={() => {
+					if (!organizationId) return;
+					removeIcon.mutate(organizationId);
+				}}
+				maxFileSizeBytes={1 * 1024 * 1024} // 1MB
+			/>
+		</div>
+	);
 };

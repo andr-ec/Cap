@@ -1,12 +1,12 @@
 #![cfg(windows)]
 
 use cap_camera_directshow::{AM_MEDIA_TYPEVideoExt, AMMediaType};
-use cap_camera_mediafoundation::{IMFMediaBufferExt, IMFMediaBufferLock};
+use cap_mediafoundation_utils::*;
 use std::{
     ffi::{OsStr, OsString},
     fmt::{Debug, Display},
     ops::Deref,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use windows::Win32::Media::{DirectShow::*, KernelStreaming::*, MediaFoundation::*};
@@ -55,7 +55,7 @@ impl VideoDeviceInfo {
     }
 
     pub fn model_id(&self) -> Option<&str> {
-        self.model_id.as_ref().map(|s| s.as_str())
+        self.model_id.as_deref()
     }
 
     pub fn is_mf(&self) -> bool {
@@ -83,7 +83,7 @@ impl VideoDeviceInfo {
                 let format = VideoFormat::new_mf(mf_format.clone())?;
 
                 let handle = device.start_capturing(
-                    &mf_format,
+                    mf_format,
                     Box::new(move |data| {
                         let sample = &data.sample;
                         let len = unsafe { sample.GetBufferCount() }.unwrap();
@@ -98,8 +98,8 @@ impl VideoDeviceInfo {
                                 height: format.height() as usize,
                                 pixel_format: format.pixel_format,
                                 timestamp: data.timestamp,
-                                reference_time: data.reference_time,
-                                capture_begin_time: Some(data.capture_begin_time),
+                                perf_counter: data.perf_counter,
+                                // capture_begin_time: Some(data.capture_begin_time),
                             })
                         }
                     }),
@@ -118,7 +118,7 @@ impl VideoDeviceInfo {
                             &*(media_type.pbFormat as *const _ as *const KS_VIDEOINFOHEADER)
                         };
 
-                        let Some(format) = DSPixelFormat::new(&media_type).map(|v| v.format) else {
+                        let Some(format) = DSPixelFormat::new(media_type).map(|v| v.format) else {
                             return;
                         };
 
@@ -128,8 +128,8 @@ impl VideoDeviceInfo {
                             width: video_info.bmiHeader.biWidth as usize,
                             height: video_info.bmiHeader.biHeight as usize,
                             timestamp: data.timestamp,
-                            reference_time: data.reference_time,
-                            capture_begin_time: None,
+                            perf_counter: data.perf_counter,
+                            // capture_begin_time: None,
                         });
                     }),
                 )?;
@@ -178,9 +178,9 @@ pub struct Frame {
     pub pixel_format: PixelFormat,
     pub width: usize,
     pub height: usize,
-    pub reference_time: Instant,
+    // pub reference_time: Instant,
     pub timestamp: Duration,
-    pub capture_begin_time: Option<Instant>,
+    pub perf_counter: i64,
     inner: FrameInner,
 }
 
@@ -325,7 +325,7 @@ pub fn get_devices() -> Result<Vec<VideoDeviceInfo>, GetDevicesError> {
 
         match mf_device {
             Some((i, mf_device)) => {
-                if mf_device.formats().len() == 0 {
+                if mf_device.formats().is_empty() {
                     devices.push(mf_device.clone());
                     devices.swap_remove(i);
                 }
@@ -372,7 +372,7 @@ pub enum VideoFormatInner {
 
 impl Debug for VideoFormatInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&match self {
+        f.write_str(match self {
             VideoFormatInner::MediaFoundation(_) => "MediaFoundation",
             VideoFormatInner::DirectShow(_) => "DirectShow",
         })
@@ -449,6 +449,7 @@ impl Display for VideoFormat {
 
 struct MFPixelFormat {
     format: PixelFormat,
+    #[allow(unused)]
     mf: GUID,
 }
 
@@ -484,6 +485,7 @@ impl Deref for MFPixelFormat {
 
 struct DSPixelFormat {
     format: PixelFormat,
+    #[allow(unused)]
     ds: GUID,
 }
 

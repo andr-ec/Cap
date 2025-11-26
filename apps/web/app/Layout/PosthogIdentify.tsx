@@ -1,42 +1,41 @@
 "use client";
 
 import { Suspense, use, useEffect } from "react";
-import { useAuthContext } from "./AuthContext";
+import { checkAndMarkUserSignedUpTracked } from "@/actions/analytics/track-user-signed-up";
 import {
-  identifyUser,
-  initAnonymousUser,
-  trackEvent,
+	identifyUser,
+	initAnonymousUser,
+	trackEvent,
 } from "../utils/analytics";
+import { useCurrentUser } from "./AuthContext";
 
 export function PosthogIdentify() {
-  return (
-    <Suspense>
-      <Inner />
-    </Suspense>
-  );
+	return (
+		<Suspense>
+			<Inner />
+		</Suspense>
+	);
 }
 
 function Inner() {
-  const user = use(useAuthContext().user);
+	const user = useCurrentUser();
 
-  useEffect(() => {
-    if (!user) {
-      initAnonymousUser();
-      return;
-    } else {
-      // Track if this is the first time a user is being identified
-      const isNewUser = !localStorage.getItem("user_identified");
+	useEffect(() => {
+		if (!user) {
+			initAnonymousUser();
+			return;
+		} else {
+			identifyUser(user.id);
 
-      identifyUser(user.id);
+			(async () => {
+				const { shouldTrack } = await checkAndMarkUserSignedUpTracked();
+				if (shouldTrack) {
+					trackEvent("user_signed_up");
+				}
+				trackEvent("user_signed_in");
+			})();
+		}
+	}, [user]);
 
-      if (isNewUser) {
-        localStorage.setItem("user_identified", "true");
-        trackEvent("user_signed_up");
-      }
-
-      trackEvent("user_signed_in");
-    }
-  }, [user]);
-
-  return null;
+	return null;
 }

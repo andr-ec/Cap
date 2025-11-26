@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use cap_cursor_info::ResolvedCursor;
 use cap_project::*;
 use image::GenericImageView;
 use tracing::error;
@@ -15,6 +14,14 @@ use crate::{
 const CURSOR_CLICK_DURATION: f64 = 0.25;
 const CURSOR_CLICK_DURATION_MS: f64 = CURSOR_CLICK_DURATION * 1000.0;
 const CLICK_SHRINK_SIZE: f32 = 0.7;
+const CURSOR_IDLE_MIN_DELAY_MS: f64 = 500.0;
+const CURSOR_IDLE_FADE_OUT_MS: f64 = 400.0;
+const CURSOR_VECTOR_CAP: f32 = 320.0;
+const CURSOR_MIN_MOTION_NORMALIZED: f32 = 0.01;
+const CURSOR_MIN_MOTION_PX: f32 = 1.0;
+const CURSOR_BASELINE_FPS: f32 = 60.0;
+const CURSOR_MULTIPLIER: f32 = 3.0;
+const CURSOR_MAX_STRENGTH: f32 = 5.0;
 
 /// The size to render the svg to.
 static SVG_CURSOR_RASTERIZED_HEIGHT: u32 = 200;
@@ -204,30 +211,78 @@ impl CursorLayer {
             return;
         };
 
-        let velocity: [f32; 2] = [0.0, 0.0];
-        // let velocity: [f32; 2] = [
-        //     interpolated_cursor.velocity.x * 75.0,
-        //     interpolated_cursor.velocity.y * 75.0,
-        // ];
+        let fps = uniforms.frame_rate.max(1) as f32;
+        let screen_size = constants.options.screen_size;
+        let screen_diag =
+            (((screen_size.x as f32).powi(2) + (screen_size.y as f32).powi(2)).sqrt()).max(1.0);
+        let fps_scale = fps / CURSOR_BASELINE_FPS;
+        let cursor_strength = (uniforms.motion_blur_amount * CURSOR_MULTIPLIER * fps_scale)
+            .clamp(0.0, CURSOR_MAX_STRENGTH);
+        let parent_motion = uniforms.display_parent_motion_px;
+        let child_motion = uniforms
+            .prev_cursor
+            .as_ref()
+            .filter(|prev| prev.cursor_id == interpolated_cursor.cursor_id)
+            .map(|prev| {
+                let delta_uv = XY::new(
+                    (interpolated_cursor.position.coord.x - prev.position.coord.x) as f32,
+                    (interpolated_cursor.position.coord.y - prev.position.coord.y) as f32,
+                );
+                XY::new(
+                    delta_uv.x * screen_size.x as f32,
+                    delta_uv.y * screen_size.y as f32,
+                )
+            })
+            .unwrap_or_else(|| XY::new(0.0, 0.0));
 
-        let speed = (velocity[0] * velocity[0] + velocity[1] * velocity[1]).sqrt();
-        let motion_blur_amount = (speed * 0.3).min(1.0) * 0.0; // uniforms.project.cursor.motion_blur;
+        let combined_motion_px = if cursor_strength <= f32::EPSILON {
+            XY::new(0.0, 0.0)
+        } else {
+            combine_cursor_motion(parent_motion, child_motion)
+        };
 
-        let is_svg_assets_enabled = !uniforms.project.cursor.raw && uniforms.project.cursor.use_svg;
+        let normalized_motion = ((combined_motion_px.x / screen_diag).powi(2)
+            + (combined_motion_px.y / screen_diag).powi(2))
+        .sqrt();
+        let has_motion =
+            normalized_motion > CURSOR_MIN_MOTION_NORMALIZED && cursor_strength > f32::EPSILON;
+        let scaled_motion = if has_motion {
+            clamp_cursor_vector(combined_motion_px * cursor_strength)
+        } else {
+            XY::new(0.0, 0.0)
+        };
+
+        let mut cursor_opacity = 1.0f32;
+        if uniforms.project.cursor.hide_when_idle && !cursor.moves.is_empty() {
+            let hide_delay_secs = uniforms
+                .project
+                .cursor
+                .hide_when_idle_delay
+                .max((CURSOR_IDLE_MIN_DELAY_MS / 1000.0) as f32);
+            let hide_delay_ms = (hide_delay_secs as f64 * 1000.0).max(CURSOR_IDLE_MIN_DELAY_MS);
+            cursor_opacity = compute_cursor_idle_opacity(
+                cursor,
+                segment_frames.recording_time as f64 * 1000.0,
+                hide_delay_ms,
+            );
+            if cursor_opacity <= f32::EPSILON {
+                cursor_opacity = 0.0;
+            }
+        }
 
         // Remove all cursor assets if the svg configuration changes.
         // it might change the texture.
         //
         // This would be better if it only invalidated the required assets but that would be more complicated.
-        if self.prev_is_svg_assets_enabled != Some(is_svg_assets_enabled) {
-            self.prev_is_svg_assets_enabled = Some(is_svg_assets_enabled);
+        if self.prev_is_svg_assets_enabled != Some(uniforms.project.cursor.use_svg) {
+            self.prev_is_svg_assets_enabled = Some(uniforms.project.cursor.use_svg);
             self.cursors.drain();
         }
 
         if !self.cursors.contains_key(&interpolated_cursor.cursor_id) {
             let mut cursor = None;
 
-            let cursor_hash = match &constants.recording_meta.inner {
+            let cursor_shape = match &constants.recording_meta.inner {
                 RecordingMetaInner::Studio(StudioRecordingMeta::MultipleSegments {
                     inner:
                         MultipleSegments {
@@ -236,45 +291,40 @@ impl CursorLayer {
                         },
                 }) => cursors
                     .get(&interpolated_cursor.cursor_id)
-                    .and_then(|v| v.hash.clone()),
+                    .and_then(|v| v.shape),
                 _ => None,
             };
 
             // Attempt to find and load a higher-quality SVG cursor included in Cap.
             // These are used instead of the OS provided cursor images when possible as the quality is better.
-            if let Some(cursor_hash) = cursor_hash
+            if let Some(cursor_shape) = cursor_shape
                 && uniforms.project.cursor.use_svg
+                && let Some(info) = cursor_shape.resolve()
             {
-                if let Some(info) = ResolvedCursor::from_hash(cursor_hash) {
-                    cursor = CursorTexture::prepare_svg(&constants, info.raw, info.hotspot.into())
-                        .map_err(|err| {
-                            error!(
-                                "Error loading SVG cursor {:?}: {err}",
-                                interpolated_cursor.cursor_id
-                            )
-                        })
-                        .ok();
-                }
+                cursor = CursorTexture::prepare_svg(constants, info.raw, info.hotspot.into())
+                    .map_err(|err| {
+                        error!(
+                            "Error loading SVG cursor {:?}: {err}",
+                            interpolated_cursor.cursor_id
+                        )
+                    })
+                    .ok();
             }
 
             // If not we attempt to load the low-quality image cursor
             if let StudioRecordingMeta::MultipleSegments { inner, .. } = &constants.meta
                 && cursor.is_none()
-            {
-                if let Some(c) = inner
+                && let Some(c) = inner
                     .get_cursor_image(&constants.recording_meta, &interpolated_cursor.cursor_id)
-                {
-                    if let Ok(img) = image::open(&c.path).map_err(|err| {
-                        error!("Failed to load cursor image from {:?}: {err}", c.path)
-                    }) {
-                        cursor = Some(CursorTexture::prepare(
-                            constants,
-                            &img.to_rgba8(),
-                            img.dimensions(),
-                            c.hotspot,
-                        ));
-                    }
-                }
+                && let Ok(img) = image::open(&c.path)
+                    .map_err(|err| error!("Failed to load cursor image from {:?}: {err}", c.path))
+            {
+                cursor = Some(CursorTexture::prepare(
+                    constants,
+                    &img.to_rgba8(),
+                    img.dimensions(),
+                    c.hotspot,
+                ));
             }
 
             if let Some(cursor) = cursor {
@@ -288,43 +338,48 @@ impl CursorLayer {
         };
 
         let size = {
-            let cursor_texture_size = cursor_texture.texture.size();
-            let cursor_texture_size_aspect =
-                cursor_texture_size.width as f32 / cursor_texture_size.height as f32;
+            let base_size_px = STANDARD_CURSOR_HEIGHT / constants.options.screen_size.y as f32
+                * uniforms.output_size.1 as f32;
 
-            let cursor_size_percentage = if uniforms.cursor_size <= 0.0 {
+            let cursor_size_factor = if uniforms.cursor_size <= 0.0 {
                 100.0
             } else {
                 uniforms.cursor_size / 100.0
             };
-            let factor = STANDARD_CURSOR_HEIGHT / constants.options.screen_size.y as f32
-                * uniforms.output_size.1 as f32;
 
-            let cursor_size_constant = factor * cursor_size_percentage;
+            // 0 -> 1 indicating how much to shrink from click
+            let click_t = get_click_t(&cursor.clicks, (time_s as f64) * 1000.0);
+            // lerp shrink size
+            let click_scale_factor = click_t * 1.0 + (1.0 - click_t) * CLICK_SHRINK_SIZE;
 
-            Coord::<FrameSpace>::new(if cursor_texture_size_aspect > 1.0 {
+            let size = base_size_px * cursor_size_factor * click_scale_factor;
+
+            let texture_size_aspect = {
+                let texture_size = cursor_texture.texture.size();
+                texture_size.width as f32 / texture_size.height as f32
+            };
+
+            Coord::<FrameSpace>::new(if texture_size_aspect > 1.0 {
                 // Wide cursor: base sizing on width to prevent excessive width
-                let width = cursor_size_constant;
-                let height = cursor_size_constant / cursor_texture_size_aspect;
+                let width = size;
+                let height = size / texture_size_aspect;
                 XY::new(width, height).into()
             } else {
                 // Tall or square cursor: base sizing on height (current behavior)
-                XY::new(
-                    cursor_size_constant * cursor_texture_size_aspect,
-                    cursor_size_constant,
-                )
-                .into()
+                XY::new(size * texture_size_aspect, size).into()
             })
         };
 
         let hotspot = Coord::<FrameSpace>::new(size.coord * cursor_texture.hotspot);
 
+        // Calculate position without hotspot first
         let position = interpolated_cursor.position.to_frame_space(
             &constants.options,
             &uniforms.project,
             resolution_base,
         ) - hotspot;
 
+        // Transform to zoomed space
         let zoomed_position = position.to_zoomed_frame_space(
             &constants.options,
             &uniforms.project,
@@ -339,27 +394,34 @@ impl CursorLayer {
             zoom,
         ) - zoomed_position;
 
-        let click_scale_factor = get_click_t(&cursor.clicks, (time_s as f64) * 1000.0)
-        	// lerp shrink size
-            * (1.0 - CLICK_SHRINK_SIZE)
-            + CLICK_SHRINK_SIZE;
+        let effective_strength = if has_motion { cursor_strength } else { 0.0 };
 
-        let cursor_size_px = zoomed_size.coord * click_scale_factor as f64;
-
-        let uniforms = CursorUniforms {
-            position: [zoomed_position.x as f32, zoomed_position.y as f32],
-            size: [cursor_size_px.x as f32, cursor_size_px.y as f32],
-            output_size: [uniforms.output_size.0 as f32, uniforms.output_size.1 as f32],
+        let cursor_uniforms = CursorUniforms {
+            position_size: [
+                zoomed_position.x as f32,
+                zoomed_position.y as f32,
+                zoomed_size.x as f32,
+                zoomed_size.y as f32,
+            ],
+            output_size: [
+                uniforms.output_size.0 as f32,
+                uniforms.output_size.1 as f32,
+                0.0,
+                0.0,
+            ],
             screen_bounds: uniforms.display.target_bounds,
-            velocity,
-            motion_blur_amount,
-            _alignment: [0.0; 3],
+            motion_vector_strength: [
+                scaled_motion.x,
+                scaled_motion.y,
+                effective_strength,
+                cursor_opacity,
+            ],
         };
 
         constants.queue.write_buffer(
             &self.statics.uniform_buffer,
             0,
-            bytemuck::cast_slice(&[uniforms]),
+            bytemuck::cast_slice(&[cursor_uniforms]),
         );
 
         self.bind_group = Some(
@@ -377,36 +439,109 @@ impl CursorLayer {
     }
 }
 
-#[repr(C, align(16))]
-#[derive(Debug, Clone, Copy, Pod, Zeroable, Default)]
-pub struct CursorUniforms {
-    position: [f32; 2],
-    size: [f32; 2],
-    output_size: [f32; 2],
-    screen_bounds: [f32; 4],
-    velocity: [f32; 2],
-    motion_blur_amount: f32,
-    _alignment: [f32; 3],
-}
-
-pub fn find_cursor_move(cursor: &CursorEvents, time: f32) -> &CursorMoveEvent {
-    let time_ms = time * 1000.0;
-
-    if cursor.moves[0].time_ms > time_ms.into() {
-        return &cursor.moves[0];
+fn combine_cursor_motion(parent: XY<f32>, child: XY<f32>) -> XY<f32> {
+    fn combine_axis(parent: f32, child: f32) -> f32 {
+        if parent.abs() > CURSOR_MIN_MOTION_PX
+            && child.abs() > CURSOR_MIN_MOTION_PX
+            && parent.signum() != child.signum()
+        {
+            0.0
+        } else {
+            parent + child
+        }
     }
 
-    let event = cursor
+    XY::new(
+        combine_axis(parent.x, child.x),
+        combine_axis(parent.y, child.y),
+    )
+}
+
+fn clamp_cursor_vector(vec: XY<f32>) -> XY<f32> {
+    let len = (vec.x * vec.x + vec.y * vec.y).sqrt();
+    if len <= CURSOR_VECTOR_CAP || len <= f32::EPSILON {
+        vec
+    } else {
+        vec * (CURSOR_VECTOR_CAP / len)
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable, Default)]
+pub struct CursorUniforms {
+    position_size: [f32; 4],
+    output_size: [f32; 4],
+    screen_bounds: [f32; 4],
+    motion_vector_strength: [f32; 4],
+}
+
+fn compute_cursor_idle_opacity(
+    cursor: &CursorEvents,
+    current_time_ms: f64,
+    hide_delay_ms: f64,
+) -> f32 {
+    if cursor.moves.is_empty() {
+        return 0.0;
+    }
+
+    if current_time_ms <= cursor.moves[0].time_ms {
+        return 1.0;
+    }
+
+    let Some(last_index) = cursor
         .moves
         .iter()
-        .rev()
-        .find(|event| {
-            // println!("Checking event at time: {}ms", event.process_time_ms);
-            event.time_ms <= time_ms.into()
-        })
-        .unwrap_or(&cursor.moves[0]);
+        .rposition(|event| event.time_ms <= current_time_ms)
+    else {
+        return 1.0;
+    };
 
-    event
+    let last_move = &cursor.moves[last_index];
+
+    let time_since_move = (current_time_ms - last_move.time_ms).max(0.0);
+
+    let mut opacity = compute_cursor_fade_in(cursor, current_time_ms, hide_delay_ms);
+
+    let fade_out = if time_since_move <= hide_delay_ms {
+        1.0
+    } else {
+        let delta = time_since_move - hide_delay_ms;
+        let fade = 1.0 - smoothstep64(0.0, CURSOR_IDLE_FADE_OUT_MS, delta);
+        fade.clamp(0.0, 1.0) as f32
+    };
+
+    opacity *= fade_out;
+    opacity.clamp(0.0, 1.0)
+}
+
+fn smoothstep64(edge0: f64, edge1: f64, x: f64) -> f64 {
+    if edge1 <= edge0 {
+        return if x < edge0 { 0.0 } else { 1.0 };
+    }
+
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn compute_cursor_fade_in(cursor: &CursorEvents, current_time_ms: f64, hide_delay_ms: f64) -> f32 {
+    let resume_time = cursor
+        .moves
+        .windows(2)
+        .rev()
+        .find(|pair| {
+            let prev = &pair[0];
+            let next = &pair[1];
+            next.time_ms <= current_time_ms && next.time_ms - prev.time_ms > hide_delay_ms
+        })
+        .map(|pair| pair[1].time_ms);
+
+    let Some(resume_time_ms) = resume_time else {
+        return 1.0;
+    };
+
+    let time_since_resume = (current_time_ms - resume_time_ms).max(0.0);
+
+    smoothstep64(0.0, CURSOR_IDLE_FADE_OUT_MS, time_since_resume) as f32
 }
 
 fn get_click_t(clicks: &[CursorClickEvent], time_ms: f64) -> f32 {
@@ -445,14 +580,16 @@ fn get_click_t(clicks: &[CursorClickEvent], time_ms: f64) -> f32 {
         );
     }
 
-    if let Some(next) = clicks.get(prev_i + 1) {
-        if !prev.down && next.down && next.time_ms - time_ms <= CURSOR_CLICK_DURATION_MS {
-            return smoothstep(
-                0.0,
-                CURSOR_CLICK_DURATION_MS as f32,
-                (time_ms - next.time_ms).abs() as f32,
-            );
-        }
+    if let Some(next) = clicks.get(prev_i + 1)
+        && !prev.down
+        && next.down
+        && next.time_ms - time_ms <= CURSOR_CLICK_DURATION_MS
+    {
+        return smoothstep(
+            0.0,
+            CURSOR_CLICK_DURATION_MS as f32,
+            (time_ms - next.time_ms).abs() as f32,
+        );
     }
 
     1.0
@@ -493,7 +630,7 @@ impl CursorTexture {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &rgba,
+            rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4 * dimensions.0),
@@ -516,7 +653,7 @@ impl CursorTexture {
         hotspot: XY<f64>,
     ) -> Result<Self, String> {
         let rtree = resvg::usvg::Tree::from_str(svg_data, &resvg::usvg::Options::default())
-            .map_err(|e| format!("Failed to parse SVG: {}", e))?;
+            .map_err(|e| format!("Failed to parse SVG: {e}"))?;
 
         // Although we could probably determine the size that the cursor is going to be render,
         // that would depend on the cursor size the user selects.
@@ -526,7 +663,7 @@ impl CursorTexture {
         let aspect_ratio = rtree.size().width() / rtree.size().height();
         let width = (aspect_ratio * SVG_CURSOR_RASTERIZED_HEIGHT as f32) as u32;
 
-        let mut pixmap = tiny_skia::Pixmap::new(width as u32, SVG_CURSOR_RASTERIZED_HEIGHT as u32)
+        let mut pixmap = tiny_skia::Pixmap::new(width, SVG_CURSOR_RASTERIZED_HEIGHT)
             .ok_or("Failed to create pixmap")?;
 
         // Calculate scale to fit the SVG into the target size while maintaining aspect ratio
@@ -549,5 +686,72 @@ impl CursorTexture {
             (pixmap.width(), pixmap.height()),
             hotspot,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn move_event(time_ms: f64, x: f64, y: f64) -> CursorMoveEvent {
+        CursorMoveEvent {
+            active_modifiers: vec![],
+            cursor_id: "pointer".into(),
+            time_ms,
+            x,
+            y,
+        }
+    }
+
+    fn cursor_events(times: &[(f64, f64, f64)]) -> CursorEvents {
+        CursorEvents {
+            moves: times
+                .iter()
+                .map(|(time, x, y)| move_event(*time, *x, *y))
+                .collect(),
+            clicks: vec![],
+        }
+    }
+
+    #[test]
+    fn opacity_stays_visible_with_recent_move() {
+        let cursor = cursor_events(&[(0.0, 0.0, 0.0), (1500.0, 0.1, 0.1)]);
+
+        let opacity = compute_cursor_idle_opacity(&cursor, 2000.0, 2000.0);
+
+        assert_eq!(opacity, 1.0);
+    }
+
+    #[test]
+    fn opacity_fades_once_past_delay() {
+        let cursor = cursor_events(&[(0.0, 0.0, 0.0)]);
+
+        let opacity = compute_cursor_idle_opacity(&cursor, 3000.0, 1000.0);
+
+        assert_eq!(opacity, 0.0);
+    }
+
+    #[test]
+    fn opacity_fades_in_after_long_inactivity() {
+        let cursor = cursor_events(&[(0.0, 0.0, 0.0), (5000.0, 0.5, 0.5)]);
+
+        let hide_delay_ms = 2000.0;
+
+        let at_resume = compute_cursor_idle_opacity(&cursor, 5000.0, hide_delay_ms);
+        assert_eq!(at_resume, 0.0);
+
+        let halfway = compute_cursor_idle_opacity(
+            &cursor,
+            5000.0 + CURSOR_IDLE_FADE_OUT_MS / 2.0,
+            hide_delay_ms,
+        );
+        assert!((halfway - 0.5).abs() < 0.05);
+
+        let after_fade = compute_cursor_idle_opacity(
+            &cursor,
+            5000.0 + CURSOR_IDLE_FADE_OUT_MS * 2.0,
+            hide_delay_ms,
+        );
+        assert_eq!(after_fade, 1.0);
     }
 }

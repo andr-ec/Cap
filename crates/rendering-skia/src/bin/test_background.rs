@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create output directory
     let output_dir = "test_output";
     fs::create_dir_all(output_dir)?;
-    println!("✓ Created output directory: {}", output_dir);
+    println!("✓ Created output directory: {output_dir}");
 
     // Test 1: Solid Color Background
     println!("\n1. Testing solid color background...");
@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     test_caching(&mut context, width, height)?;
 
     println!("\n=== All tests completed successfully! ===");
-    println!("Check the '{}' directory for output images.", output_dir);
+    println!("Check the '{output_dir}' directory for output images.");
 
     Ok(())
 }
@@ -69,7 +69,11 @@ fn test_color_background(
     for (color, name) in colors {
         let uniforms = SkiaProjectUniforms {
             output_size: (width, height),
-            background: BackgroundSource::Color { value: color },
+            background: BackgroundSource::Color {
+                value: color,
+                alpha: 255,
+            },
+            border: None,
         };
 
         let frame_data = FrameData {
@@ -99,12 +103,12 @@ fn test_color_background(
         );
         match image.encode(context.direct_context(), EncodedImageFormat::PNG, 100) {
             Some(data) => {
-                let path = format!("{}/background_color_{}.png", output_dir, name);
+                let path = format!("{output_dir}/background_color_{name}.png");
                 fs::write(&path, data.as_bytes())?;
-                println!("   ✓ Saved {} background to: {}", name, path);
+                println!("   ✓ Saved {name} background to: {path}");
             }
             None => {
-                println!("   ✗ Failed to encode {} color image to PNG", name);
+                println!("   ✗ Failed to encode {name} color image to PNG");
             }
         }
     }
@@ -133,6 +137,7 @@ fn test_gradient_background(
             to: [0, 0, 65535],   // Blue
             angle: 45,
         },
+        border: None,
     };
 
     let frame_data = FrameData {
@@ -161,9 +166,9 @@ fn test_gradient_background(
     );
     match image.encode(context.direct_context(), EncodedImageFormat::PNG, 100) {
         Some(data) => {
-            let path = format!("{}/background_gradient.png", output_dir);
+            let path = format!("{output_dir}/background_gradient.png");
             fs::write(&path, data.as_bytes())?;
-            println!("   ✓ Saved gradient background to: {}", path);
+            println!("   ✓ Saved gradient background to: {path}");
         }
         None => {
             println!("   ✗ Failed to encode gradient image to PNG");
@@ -197,6 +202,7 @@ fn test_gradient_angles(
                 to: [32768, 0, 65535],   // Purple
                 angle,
             },
+            border: None,
         };
 
         let frame_data = FrameData {
@@ -231,13 +237,10 @@ fn test_gradient_angles(
                     output_dir, angle as i32
                 );
                 fs::write(&path, data.as_bytes())?;
-                println!("   ✓ Saved gradient with angle {} to: {}", angle, path);
+                println!("   ✓ Saved gradient with angle {angle} to: {path}");
             }
             None => {
-                println!(
-                    "   ✗ Failed to encode gradient angle {} image to PNG",
-                    angle
-                );
+                println!("   ✗ Failed to encode gradient angle {angle} image to PNG");
             }
         }
     }
@@ -264,6 +267,7 @@ fn test_caching(
             to: [0, 0, 65535],
             angle: 90,
         },
+        border: None,
     };
 
     let frame_data = FrameData {
@@ -280,7 +284,7 @@ fn test_caching(
     let canvas = surface.canvas();
     layer_stack.render(canvas, &uniforms);
     let first_render_time = start.elapsed();
-    println!("     Time: {:?}", first_render_time);
+    println!("     Time: {first_render_time:?}");
 
     // Second render with same uniforms - should use cache
     println!("   - Second render (using cache)...");
@@ -288,7 +292,7 @@ fn test_caching(
     let canvas = surface.canvas();
     layer_stack.render(canvas, &uniforms);
     let cached_render_time = start.elapsed();
-    println!("     Time: {:?}", cached_render_time);
+    println!("     Time: {cached_render_time:?}");
 
     // Cache should make it faster
     if cached_render_time < first_render_time {
@@ -309,6 +313,7 @@ fn test_caching(
             to: [65535, 65535, 0],
             angle: 45,
         },
+        border: None,
     };
 
     let new_frame_data = FrameData {
@@ -323,7 +328,7 @@ fn test_caching(
     let canvas = surface.canvas();
     layer_stack.render(canvas, &new_uniforms);
     let new_render_time = start.elapsed();
-    println!("     Time: {:?}", new_render_time);
+    println!("     Time: {new_render_time:?}");
 
     Ok(())
 }

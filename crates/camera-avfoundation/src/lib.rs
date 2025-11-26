@@ -1,26 +1,34 @@
 #![cfg(target_os = "macos")]
 
-use std::{
-    fmt::Display,
-    time::{Duration, Instant},
-};
-
 use cidre::{
     av::capture::{VideoDataOutputSampleBufDelegate, VideoDataOutputSampleBufDelegateImpl},
     cv::{PixelBuf, pixel_buffer::LockFlags},
     *,
 };
+use std::{
+    fmt::Display,
+    time::{Duration, Instant},
+};
+use tracing::warn;
 
 pub fn list_video_devices() -> arc::R<ns::Array<av::CaptureDevice>> {
-    let mut device_types = vec![
-        av::CaptureDeviceType::built_in_wide_angle_camera(),
-        av::CaptureDeviceType::desk_view_camera(),
-    ];
+    let mut device_types = vec![av::CaptureDeviceType::built_in_wide_angle_camera()];
+
+    if api::macos_available("13.0")
+        && let Some(typ) = unsafe { av::CaptureDeviceType::desk_view_camera() }
+    {
+        device_types.push(typ);
+    }
 
     if api::macos_available("14.0") {
-        device_types.push(unsafe { av::CaptureDeviceType::external().unwrap() })
+        if let Some(typ) = unsafe { av::CaptureDeviceType::external() } {
+            device_types.push(typ);
+        }
+        if let Some(typ) = unsafe { av::CaptureDeviceType::continuity_camera() } {
+            device_types.push(typ);
+        }
     } else {
-        device_types.push(av::CaptureDeviceType::external_unknown())
+        device_types.push(av::CaptureDeviceType::external_unknown());
     }
 
     let device_types = ns::Array::from_slice(&device_types);
@@ -60,7 +68,7 @@ impl TryFrom<&cf::String> for YCbCrMatrix {
             s if s == cv::image_buf_attachment::ycbcr_matrix::itu_r_601_4() => Self::Rec601,
             s if s == cv::image_buf_attachment::ycbcr_matrix::itu_r_709_2() => Self::Rec709,
             s if s == cv::image_buf_attachment::ycbcr_matrix::itu_r_2020() => Self::Rec2020,
-            s => return Err(()),
+            _ => return Err(()),
         })
     }
 }
@@ -118,7 +126,11 @@ impl VideoDataOutputSampleBufDelegateImpl for CallbackOutputDelegate {
             .stream_start
             .get_or_insert_with(|| (Instant::now(), pres_timestamp));
 
-        let timestamp = pres_timestamp - stream_start.1;
+        let Some(timestamp) = pres_timestamp.checked_sub(stream_start.1) else {
+            warn!("PTS {pres_timestamp:?} less than stream start {stream_start:?}");
+
+            return;
+        };
 
         let capture_begin_time = stream_start.0 + capture_begin_time.unwrap_or(Duration::ZERO);
 

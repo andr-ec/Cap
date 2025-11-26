@@ -4,7 +4,7 @@ use cap_project::{RecordingMeta, XY};
 use serde::Deserialize;
 use specta::Type;
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{info, instrument};
 
 #[derive(Deserialize, Clone, Copy, Debug, Type)]
 #[serde(tag = "format")]
@@ -24,6 +24,7 @@ impl ExportSettings {
 
 #[tauri::command]
 #[specta::specta]
+#[instrument(skip(progress))]
 pub async fn export_video(
     project_path: PathBuf,
     progress: tauri::ipc::Channel<FramesRendered>,
@@ -88,30 +89,20 @@ pub struct ExportEstimates {
 // This will need to be refactored at some point to be more accurate.
 #[tauri::command]
 #[specta::specta]
+#[instrument]
 pub async fn get_export_estimates(
     path: PathBuf,
     resolution: XY<u32>,
     fps: u32,
 ) -> Result<ExportEstimates, String> {
-    let screen_metadata = get_video_metadata(path.clone()).await?;
-    let camera_metadata = get_video_metadata(path.clone()).await.ok();
+    let metadata = get_video_metadata(path.clone()).await?;
 
-    let raw_duration = screen_metadata.duration.max(
-        camera_metadata
-            .map(|m| m.duration)
-            .unwrap_or(screen_metadata.duration),
-    );
-
-    let meta = RecordingMeta::load_for_project(&path).unwrap();
+    let meta = RecordingMeta::load_for_project(&path).map_err(|e| e.to_string())?;
     let project_config = meta.project_config();
     let duration_seconds = if let Some(timeline) = &project_config.timeline {
-        timeline
-            .segments
-            .iter()
-            .map(|s| (s.end - s.start) / s.timescale)
-            .sum()
+        timeline.segments.iter().map(|s| s.duration()).sum()
     } else {
-        raw_duration
+        metadata.duration
     };
 
     let (width, height) = (resolution.x, resolution.y);

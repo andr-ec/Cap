@@ -1,9 +1,11 @@
-use cap_media::{feeds::RawCameraFrame, frame_ws::WSFrame};
+use cap_recording::FFmpegVideoFrame;
 use flume::Sender;
 use tokio_util::sync::CancellationToken;
 
-pub async fn create_camera_preview_ws() -> (Sender<RawCameraFrame>, u16, CancellationToken) {
-    let (camera_tx, mut _camera_rx) = flume::bounded::<RawCameraFrame>(4);
+use crate::frame_ws::{WSFrame, create_frame_ws};
+
+pub async fn create_camera_preview_ws() -> (Sender<FFmpegVideoFrame>, u16, CancellationToken) {
+    let (camera_tx, mut _camera_rx) = flume::bounded::<FFmpegVideoFrame>(4);
     let (_camera_tx, camera_rx) = flume::bounded::<WSFrame>(4);
     std::thread::spawn(move || {
         use ffmpeg::format::Pixel;
@@ -11,7 +13,7 @@ pub async fn create_camera_preview_ws() -> (Sender<RawCameraFrame>, u16, Cancell
         let mut converter: Option<(Pixel, ffmpeg::software::scaling::Context)> = None;
 
         while let Ok(raw_frame) = _camera_rx.recv() {
-            let mut frame = raw_frame.frame;
+            let mut frame = raw_frame.inner;
 
             if frame.format() != Pixel::RGBA || frame.width() > 1280 || frame.height() > 720 {
                 let converter = match &mut converter {
@@ -64,7 +66,7 @@ pub async fn create_camera_preview_ws() -> (Sender<RawCameraFrame>, u16, Cancell
         }
     });
     // _shutdown needs to be kept alive to keep the camera ws running
-    let (camera_ws_port, _shutdown) = cap_media::frame_ws::create_frame_ws(camera_rx.clone()).await;
+    let (camera_ws_port, _shutdown) = create_frame_ws(camera_rx.clone()).await;
 
     (camera_tx, camera_ws_port, _shutdown)
 }

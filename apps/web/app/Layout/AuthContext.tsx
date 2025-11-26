@@ -1,28 +1,42 @@
 "use client";
 
-import type { getCurrentUser } from "@cap/database/auth/session";
+import type { ImageUpload, Organisation, User } from "@cap/web-domain";
 import { createContext, use } from "react";
 
+export type CurrentUser = {
+	id: User.UserId;
+	email: string;
+	name: string | null;
+	lastName: string | null;
+	imageUrl: ImageUpload.ImageUrl | null;
+	defaultOrgId: Organisation.OrganisationId | null;
+	isPro: boolean;
+};
+
 const AuthContext = createContext<
-  { user: ReturnType<typeof getCurrentUser> } | undefined
+	{ user: Promise<CurrentUser | null> } | undefined
 >(undefined);
 
 export function AuthContextProvider({
-  children,
-  user,
+	children,
+	user,
 }: {
-  children: React.ReactNode;
-  user: ReturnType<typeof getCurrentUser>;
+	children: React.ReactNode;
+	user: Promise<CurrentUser | null>;
 }) {
-  return (
-    <AuthContext.Provider value={{ user }}>{children}</AuthContext.Provider>
-  );
+	return (
+		<AuthContext.Provider value={{ user }}>{children}</AuthContext.Provider>
+	);
 }
 
 export function useAuthContext() {
-  const context = use(AuthContext);
-  if (!context) {
-    throw new Error("useSiteContext must be used within a SiteContextProvider");
-  }
-  return context;
+	const context = use(AuthContext);
+	if (!context) {
+		throw new Error("useSiteContext must be used within a SiteContextProvider");
+	}
+	return context;
+}
+
+export function useCurrentUser() {
+	return use(useAuthContext().user);
 }

@@ -1,24 +1,30 @@
 #![cfg(windows)]
 #![allow(non_snake_case)]
 
+use cap_mediafoundation_utils::*;
 use std::{
     ffi::OsString,
     fmt::Display,
     mem::MaybeUninit,
     ops::{Deref, DerefMut},
     os::windows::ffi::OsStringExt,
-    ptr::{null, null_mut},
     slice::from_raw_parts,
-    sync::{Mutex, mpsc::*},
-    time::{Duration, Instant},
+    sync::{
+        Mutex,
+        mpsc::{Receiver, Sender, channel},
+    },
+    time::Duration,
 };
-
+use tracing::error;
 use windows::Win32::{
-    Foundation::*,
+    Foundation::{S_FALSE, *},
     Media::MediaFoundation::*,
-    System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoInitialize},
+    System::{
+        Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoInitialize},
+        Performance::QueryPerformanceCounter,
+    },
 };
-use windows_core::{ComObjectInner, GUID, Interface, PWSTR, implement};
+use windows_core::{ComObjectInner, Interface, PWSTR, implement};
 
 pub fn initialize_mediafoundation() -> windows_core::Result<()> {
     unsafe { CoInitialize(None) }.ok()?;
@@ -63,6 +69,10 @@ impl DeviceSourcesIterator {
     pub fn len(&self) -> u32 {
         self.count
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
 }
 
 impl Iterator for DeviceSourcesIterator {
@@ -85,9 +95,16 @@ impl Iterator for DeviceSourcesIterator {
                 continue;
             };
 
+            let media_source = match unsafe { device.ActivateObject::<IMFMediaSource>() } {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("Failed to activate IMFMediaSource: {}", e);
+                    return None;
+                }
+            };
+
             return Some(Device {
-                media_source: unsafe { device.ActivateObject::<IMFMediaSource>() }
-                    .expect("media source doesn't have IMFMediaSource"),
+                media_source,
                 activate: device.clone(),
             });
         }
@@ -144,7 +161,7 @@ impl Device {
     pub fn model_id(&self) -> Option<String> {
         self.id()
             .ok()
-            .and_then(|v| get_device_model_id(&*v.to_string_lossy()))
+            .and_then(|v| get_device_model_id(&v.to_string_lossy()))
     }
 
     // Returns an iterator of IMFMediaTypes available for this device.
@@ -156,7 +173,8 @@ impl Device {
         let reader = unsafe {
             let mut attributes = None;
             MFCreateAttributes(&mut attributes, 1)?;
-            let attributes = attributes.expect("Attribute creation succeeded but still None!");
+            let attributes =
+                attributes.ok_or_else(|| windows_core::Error::from_hresult(S_FALSE))?;
             // Media source shuts down on drop if this isn't specified
             attributes.SetUINT32(&MF_SOURCE_READER_DISCONNECT_MEDIASOURCE_ON_SHUTDOWN, 1)?;
             MFCreateSourceReaderFromMediaSource(&self.media_source, &attributes)
@@ -202,7 +220,9 @@ impl Device {
 
             let mut attributes = None;
             MFCreateAttributes(&mut attributes, 1).map_err(StartCapturingError::ConfigureEngine)?;
-            let attributes = attributes.expect("Attribute creation succeeded but still None!");
+            let attributes = attributes.ok_or_else(|| {
+                StartCapturingError::ConfigureEngine(windows_core::Error::from_hresult(S_FALSE))
+            })?;
             attributes
                 .SetUINT32(&MF_CAPTURE_ENGINE_USE_VIDEO_DEVICE_ONLY, 1)
                 .map_err(StartCapturingError::ConfigureEngine)?;
@@ -219,7 +239,9 @@ impl Device {
                 .map_err(StartCapturingError::InitializeEngine)?;
 
             let Ok(_) = wait_for_event(&event_rx, CaptureEngineEventVariant::Initialized) else {
-                panic!("Engine initialization failed");
+                return Err(StartCapturingError::InitializeEngine(
+                    windows_core::Error::from_hresult(S_FALSE),
+                ));
             };
 
             println!("Engine initialized.");
@@ -250,17 +272,21 @@ impl Device {
 
                 loop {
                     let mut media_type = None;
-                    if let Err(_) = retry_on_invalid_request(|| {
+                    if retry_on_invalid_request(|| {
                         source.GetAvailableDeviceMediaType(
                             stream_index,
                             media_type_index,
                             Some(&mut media_type),
                         )
-                    }) {
+                    })
+                    .is_err()
+                    {
                         break;
                     }
 
-                    let media_type = media_type.expect("Failed to get media type");
+                    let Some(media_type) = media_type else {
+                        continue;
+                    };
 
                     media_type_index += 1;
 
@@ -272,7 +298,7 @@ impl Device {
 
             let Some((format, stream_index)) = maybe_format else {
                 return Err(StartCapturingError::ConfigureSource(
-                    MF_E_INVALIDREQUEST.ok().unwrap_err(),
+                    MF_E_INVALIDREQUEST.into(),
                 ));
             };
 
@@ -283,7 +309,8 @@ impl Device {
             let sink = engine
                 .GetSink(MF_CAPTURE_ENGINE_SINK_TYPE_PREVIEW)
                 .map_err(StartCapturingError::ConfigureSink)?;
-            let preview_sink: IMFCapturePreviewSink = sink.cast().expect("CapturePreviewSink");
+            let preview_sink: IMFCapturePreviewSink =
+                sink.cast().map_err(StartCapturingError::ConfigureSink)?;
             preview_sink
                 .RemoveAllStreams()
                 .map_err(StartCapturingError::ConfigureSink)?;
@@ -372,7 +399,7 @@ impl Display for Device {
             "{}",
             self.name()
                 .map(|v| v.to_string_lossy().to_string())
-                .unwrap_or_else(|_| format!("Unknown device name"))
+                .unwrap_or_else(|_| "Unknown device name".to_string())
         )
     }
 }
@@ -386,7 +413,7 @@ impl SourceReader {
     pub fn native_media_types(
         &self,
         stream_index: u32,
-    ) -> windows_core::Result<NativeMediaTypesIterator> {
+    ) -> windows_core::Result<NativeMediaTypesIterator<'_>> {
         NativeMediaTypesIterator::new(&self.inner, stream_index)
     }
 
@@ -440,7 +467,7 @@ pub struct VideoSample(IMFSample);
 impl VideoSample {
     pub fn bytes(&self) -> windows_core::Result<Vec<u8>> {
         unsafe {
-            let bytes = self.0.GetTotalLength().unwrap();
+            let bytes = self.0.GetTotalLength()?;
             let mut out = Vec::with_capacity(bytes as usize);
 
             let buffer_count = self.0.GetBufferCount()?;
@@ -478,13 +505,8 @@ impl Iterator for NativeMediaTypesIterator<'_> {
     type Item = IMFMediaType;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let Some(ret) = unsafe { self.reader.GetNativeMediaType(self.stream_index, self.i) }.ok()
-        else {
-            return None;
-        };
-
+        let ret = unsafe { self.reader.GetNativeMediaType(self.stream_index, self.i) }.ok()?;
         self.i += 1;
-
         Some(ret)
     }
 }
@@ -504,7 +526,7 @@ impl DerefMut for SourceReader {
 }
 
 fn get_device_model_id(device_id: &str) -> Option<String> {
-    const VID_PID_SIZE: usize = 4;
+    // const VID_PID_SIZE: usize = 4;
 
     let vid_location = device_id.find("vid_")?;
     let pid_location = device_id.find("pid_")?;
@@ -521,56 +543,10 @@ fn get_device_model_id(device_id: &str) -> Option<String> {
     Some(format!("{id_vendor}:{id_product}"))
 }
 
-pub trait IMFMediaBufferExt {
-    fn lock(&self) -> windows_core::Result<IMFMediaBufferLock>;
-}
-
-impl IMFMediaBufferExt for IMFMediaBuffer {
-    fn lock(&self) -> windows_core::Result<IMFMediaBufferLock> {
-        let mut bytes_ptr = null_mut();
-        let mut size = 0;
-
-        unsafe {
-            self.Lock(&mut bytes_ptr, None, Some(&mut size))?;
-        }
-
-        Ok(IMFMediaBufferLock {
-            source: self,
-            bytes: unsafe { std::slice::from_raw_parts_mut(bytes_ptr as *mut u8, size as usize) },
-        })
-    }
-}
-
-pub struct IMFMediaBufferLock<'a> {
-    source: &'a IMFMediaBuffer,
-    bytes: &'a mut [u8],
-}
-
-impl<'a> Drop for IMFMediaBufferLock<'a> {
-    fn drop(&mut self) {
-        let _ = unsafe { self.source.Unlock() };
-    }
-}
-
-impl<'a> Deref for IMFMediaBufferLock<'a> {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        &self.bytes
-    }
-}
-
-impl<'a> DerefMut for IMFMediaBufferLock<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.bytes
-    }
-}
-
 pub struct CallbackData {
     pub sample: IMFSample,
-    pub reference_time: Instant,
     pub timestamp: Duration,
-    pub capture_begin_time: Instant,
+    pub perf_counter: i64,
 }
 
 #[implement(IMFCaptureEngineOnSampleCallback, IMFCaptureEngineOnEventCallback)]
@@ -581,6 +557,9 @@ struct VideoCallback {
 
 impl IMFCaptureEngineOnSampleCallback_Impl for VideoCallback_Impl {
     fn OnSample(&self, psample: windows_core::Ref<'_, IMFSample>) -> windows_core::Result<()> {
+        let mut perf_counter = 0;
+        unsafe { QueryPerformanceCounter(&mut perf_counter)? };
+
         let Some(sample) = psample.as_ref() else {
             return Ok(());
         };
@@ -589,28 +568,12 @@ impl IMFCaptureEngineOnSampleCallback_Impl for VideoCallback_Impl {
             return Ok(());
         };
 
-        let reference_time = Instant::now();
-        let mf_time_now = Duration::from_micros(unsafe { MFGetSystemTime() / 10 } as u64);
-
-        let raw_time_stamp = unsafe { sample.GetSampleTime() }.unwrap_or(0);
-        let timestamp = Duration::from_micros((raw_time_stamp / 10) as u64);
-
-        let mut raw_capture_begin_time =
-            unsafe { sample.GetUINT64(&MFSampleExtension_DeviceReferenceSystemTime) }
-                .or_else(
-                    // retry, it's what chromium does /shrug
-                    |_| unsafe { sample.GetUINT64(&MFSampleExtension_DeviceReferenceSystemTime) },
-                )
-                .unwrap_or(unsafe { MFGetSystemTime() } as u64);
-
-        let capture_begin_time =
-            reference_time + Duration::from_micros(raw_capture_begin_time / 10) - mf_time_now;
+        let sample_time = unsafe { sample.GetSampleTime() }?;
 
         (callback)(CallbackData {
             sample: sample.clone(),
-            reference_time,
-            timestamp,
-            capture_begin_time,
+            timestamp: Duration::from_micros(sample_time as u64 / 10),
+            perf_counter,
         });
 
         Ok(())
@@ -687,7 +650,7 @@ fn wait_for_event(
     variant: CaptureEngineEventVariant,
 ) -> Result<CaptureEngineEvent, windows_core::HRESULT> {
     rx.iter()
-        .find_map(|e| match dbg!(e.variant()) {
+        .find_map(|e| match e.variant() {
             Some(v) if v == variant => Some(Ok(e)),
             Some(CaptureEngineEventVariant::Error) => {
                 Some(Err(unsafe { e.0.GetStatus() }.unwrap()))

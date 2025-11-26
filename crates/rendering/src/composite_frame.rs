@@ -8,24 +8,62 @@ pub struct CompositeVideoFramePipeline {
     pub render_pipeline: wgpu::RenderPipeline,
 }
 
-#[derive(Debug, Clone, Copy, Pod, Zeroable, Default)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct CompositeVideoFrameUniforms {
     pub crop_bounds: [f32; 4],
     pub target_bounds: [f32; 4],
     pub output_size: [f32; 2],
     pub frame_size: [f32; 2],
-    pub velocity_uv: [f32; 2],
+    pub motion_blur_vector: [f32; 2],
+    pub motion_blur_zoom_center: [f32; 2],
+    pub motion_blur_params: [f32; 4],
     pub target_size: [f32; 2],
     pub rounding_px: f32,
+    pub rounding_type: f32,
     pub mirror_x: f32,
-    pub motion_blur_amount: f32,
-    pub camera_motion_blur_amount: f32,
     pub shadow: f32,
     pub shadow_size: f32,
     pub shadow_opacity: f32,
     pub shadow_blur: f32,
-    pub _padding: [f32; 3],
+    pub opacity: f32,
+    pub border_enabled: f32,
+    pub border_width: f32,
+    pub _padding0: f32,
+    pub _padding1: [f32; 2],
+    pub _padding1b: [f32; 2],
+    pub border_color: [f32; 4],
+    pub _padding2: [f32; 4],
+}
+
+impl Default for CompositeVideoFrameUniforms {
+    fn default() -> Self {
+        Self {
+            crop_bounds: Default::default(),
+            target_bounds: Default::default(),
+            output_size: Default::default(),
+            frame_size: Default::default(),
+            motion_blur_vector: Default::default(),
+            motion_blur_zoom_center: [0.5, 0.5],
+            motion_blur_params: Default::default(),
+            target_size: Default::default(),
+            rounding_px: Default::default(),
+            rounding_type: 0.0,
+            mirror_x: Default::default(),
+            shadow: Default::default(),
+            shadow_size: Default::default(),
+            shadow_opacity: Default::default(),
+            shadow_blur: Default::default(),
+            opacity: 1.0,
+            border_enabled: 0.0,
+            border_width: 5.0,
+            _padding0: 0.0,
+            _padding1: [0.0; 2],
+            _padding1b: [0.0; 2],
+            border_color: [1.0, 1.0, 1.0, 0.8],
+            _padding2: [0.0; 4],
+        }
+    }
 }
 
 impl CompositeVideoFrameUniforms {
@@ -38,14 +76,18 @@ impl CompositeVideoFrameUniforms {
             }),
         )
     }
+
+    pub fn write_to_buffer(&self, queue: &wgpu::Queue, buffer: &wgpu::Buffer) {
+        queue.write_buffer(buffer, 0, bytemuck::bytes_of(self));
+    }
 }
 
-pub struct CompositeFrameResources {
-    pub bind_group: wgpu::BindGroup,
-    pub bind_group_layout: wgpu::BindGroupLayout,
-    pub uniforms_buffer: wgpu::Buffer,
-    pub sampler: wgpu::Sampler,
-}
+// pub struct CompositeFrameResources {
+//     pub bind_group: wgpu::BindGroup,
+//     pub bind_group_layout: wgpu::BindGroupLayout,
+//     pub uniforms_buffer: wgpu::Buffer,
+//     pub sampler: wgpu::Sampler,
+// }
 
 impl CompositeVideoFramePipeline {
     pub fn new(device: &wgpu::Device) -> Self {
@@ -109,12 +151,12 @@ impl CompositeVideoFramePipeline {
                 address_mode_w: wgpu::AddressMode::ClampToEdge,
                 mag_filter: wgpu::FilterMode::Linear,
                 min_filter: wgpu::FilterMode::Linear,
-                mipmap_filter: wgpu::FilterMode::Nearest,
+                mipmap_filter: wgpu::FilterMode::Linear,
                 ..Default::default()
             }),
         );
 
-        let bind_group = device.create_bind_group(
+        device.create_bind_group(
             &(wgpu::BindGroupDescriptor {
                 layout: &self.bind_group_layout,
                 entries: &[
@@ -133,9 +175,7 @@ impl CompositeVideoFramePipeline {
                 ],
                 label: Some("bind_group"),
             }),
-        );
-
-        bind_group
+        )
     }
 
     pub fn create_frame_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {

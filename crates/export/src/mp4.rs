@@ -1,9 +1,6 @@
-use std::{path::PathBuf, time::Duration};
-
 use crate::ExporterBase;
-use cap_editor::get_audio_segments;
-use cap_media::feeds::AudioRenderer;
-use cap_media_encoders::{AACEncoder, AudioEncoder, H264Encoder, MP4File, MP4Input};
+use cap_editor::{AudioRenderer, get_audio_segments};
+use cap_enc_ffmpeg::{AudioEncoder, aac::AACEncoder, h264::H264Encoder, mp4::*};
 use cap_media_info::{RawVideoFormat, VideoInfo};
 use cap_project::XY;
 use cap_rendering::{ProjectUniforms, RenderSegment, RenderedFrame};
@@ -11,6 +8,7 @@ use futures::FutureExt;
 use image::ImageBuffer;
 use serde::Deserialize;
 use specta::Type;
+use std::{path::PathBuf, time::Duration};
 use tracing::{info, trace, warn};
 
 #[derive(Deserialize, Type, Clone, Copy, Debug)]
@@ -51,8 +49,8 @@ impl Mp4ExportSettings {
         info!("Exporting mp4 with settings: {:?}", &self);
         info!("Expected to render {} frames", base.total_frames(self.fps));
 
-        let (tx_image_data, mut video_rx) = tokio::sync::mpsc::channel::<(RenderedFrame, u32)>(4);
-        let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<MP4Input>(4);
+        let (tx_image_data, mut video_rx) = tokio::sync::mpsc::channel::<(RenderedFrame, u32)>(8);
+        let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<MP4Input>(8);
 
         let fps = self.fps;
 
@@ -69,7 +67,7 @@ impl Mp4ExportSettings {
         let audio_segments = get_audio_segments(&base.segments);
 
         let mut audio_renderer = audio_segments
-            .get(0)
+            .first()
             .filter(|_| !base.project_config.audio.mute)
             .map(|_| AudioRenderer::new(audio_segments.clone()));
         let has_audio = audio_renderer.is_some();
@@ -81,13 +79,13 @@ impl Mp4ExportSettings {
                 "output",
                 base.output_path.clone(),
                 |o| {
-                    H264Encoder::builder("output_video", video_info)
+                    H264Encoder::builder(video_info)
                         .with_bpp(self.compression.bits_per_pixel())
                         .build(o)
                 },
                 |o| {
                     has_audio.then(|| {
-                        AACEncoder::init("output_audio", AudioRenderer::info(), o)
+                        AACEncoder::init(AudioRenderer::info(), o)
                             .map(|v| v.boxed())
                             .map_err(Into::into)
                     })
@@ -99,7 +97,12 @@ impl Mp4ExportSettings {
 
             let mut encoded_frames = 0;
             while let Ok(frame) = frame_rx.recv() {
-                encoder.queue_video_frame(frame.video);
+                encoder
+                    .queue_video_frame(
+                        frame.video,
+                        Duration::from_secs_f32(encoded_frames as f32 / fps as f32),
+                    )
+                    .map_err(|err| err.to_string())?;
                 encoded_frames += 1;
                 if let Some(audio) = frame.audio {
                     encoder.queue_audio_frame(audio);
@@ -108,7 +111,16 @@ impl Mp4ExportSettings {
 
             info!("Encoded {encoded_frames} video frames");
 
-            encoder.finish();
+            let res = encoder
+                .finish()
+                .map_err(|e| format!("Failed to finish encoding: {e}"))?;
+
+            if let Err(e) = res.video_finish {
+                return Err(format!("Video encoding failed: {e}"));
+            }
+            if let Err(e) = res.audio_finish {
+                return Err(format!("Audio encoding failed: {e}"));
+            }
 
             Ok::<_, String>(base.output_path)
         })
@@ -155,14 +167,17 @@ impl Mp4ExportSettings {
                             frame
                         });
 
-                    if let Err(_) = frame_tx.send(MP4Input {
-                        audio: audio_frame,
-                        video: video_info.wrap_frame(
-                            &frame.data,
-                            frame_number as i64,
-                            frame.padded_bytes_per_row as usize,
-                        ),
-                    }) {
+                    if frame_tx
+                        .send(MP4Input {
+                            audio: audio_frame,
+                            video: video_info.wrap_frame(
+                                &frame.data,
+                                frame_number as i64,
+                                frame.padded_bytes_per_row as usize,
+                            ),
+                        })
+                        .is_err()
+                    {
                         warn!("Renderer task sender dropped. Exiting");
                         return Ok(());
                     }
@@ -188,13 +203,13 @@ impl Mp4ExportSettings {
 
                     let screenshots_dir = project_path.join("screenshots");
                     std::fs::create_dir_all(&screenshots_dir).unwrap_or_else(|e| {
-                        eprintln!("Failed to create screenshots directory: {:?}", e);
+                        eprintln!("Failed to create screenshots directory: {e:?}");
                     });
 
                     // Save full-size screenshot
                     let screenshot_path = screenshots_dir.join("display.jpg");
                     rgb_img.save(&screenshot_path).unwrap_or_else(|e| {
-                        eprintln!("Failed to save screenshot: {:?}", e);
+                        eprintln!("Failed to save screenshot: {e:?}");
                     });
                 } else {
                     warn!("No frames were processed, cannot save screenshot or thumbnail");
