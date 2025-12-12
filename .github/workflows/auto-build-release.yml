@@ -1,13 +1,15 @@
 name: Auto-build Cap Desktop Release
 
 on:
+  push:
+    tags:
+      - 'cap-v*'
   workflow_dispatch:
     inputs:
       tag:
         description: 'Tag to build (e.g., cap-v1.2.3)'
         required: false
         type: string
-  workflow_call:
 
 jobs:
   get-version:
@@ -24,9 +26,13 @@ jobs:
         id: get-version
         run: |
           if [ -n "${{ inputs.tag }}" ]; then
+            # Manual trigger with specific tag
             TAG="${{ inputs.tag }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            # Triggered by tag push
+            TAG="${{ github.ref_name }}"
           else
-            # Get the latest cap-v* tag
+            # Fallback: get the latest cap-v* tag
             TAG=$(git tag -l "cap-v*" --sort=-version:refname | head -n1)
           fi
           

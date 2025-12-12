@@ -7,65 +7,57 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    outputs:
-      new_tag: ${{ steps.check-tags.outputs.new_tag }}
-      should_build: ${{ steps.check-tags.outputs.should_build }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Sync upstream
+          token: ${{ secrets.WORKFLOW_TOKEN }}
+
+      - name: Configure Git
         run: |
-          git config --global user.email "action@github.com"
-          git config --global user.name "GitHub Action"
-          git remote add upstream https://github.com/CapSoftware/Cap.git
-          git fetch upstream --tags
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/CapSoftware/Cap.git
+
+      - name: Sync main branch
+        run: |
+          git fetch upstream main
           git checkout main
-          git merge upstream/main
+          git merge upstream/main --no-edit
           git push origin main
-          
-      - name: Check for new tags
-        id: check-tags
+
+      - name: Sync tags (force to handle conflicts)
         run: |
-          # Get all upstream cap-v* tags
-          git fetch upstream --tags
-          
+          # Force fetch tags to overwrite any conflicts
+          git fetch upstream --tags --force
+
+          # Get list of upstream cap-v* tags
+          UPSTREAM_TAGS=$(git tag -l "cap-v*" --sort=-version:refname)
+          echo "Found upstream tags:"
+          echo "$UPSTREAM_TAGS" | head -10
+
+          # Push all tags to origin (force to handle conflicts)
+          git push origin --tags --force
+          echo "Tags synced successfully!"
+
+      - name: Check for new releases to build
+        run: |
           # Get latest upstream tag
-          LATEST_UPSTREAM=$(git tag -l "cap-v*" --sort=-version:refname | head -n1)
-          echo "Latest upstream tag: $LATEST_UPSTREAM"
-          
-          # Check if we need to create a release for this tag
-          if [ ! -z "$LATEST_UPSTREAM" ]; then
-            # Check if we already have a release for this tag
-            if gh release view "$LATEST_UPSTREAM" >/dev/null 2>&1; then
-              echo "Release already exists for $LATEST_UPSTREAM"
-              echo "should_build=false" >> $GITHUB_OUTPUT
-            else
-              echo "New tag found, need to build: $LATEST_UPSTREAM"
-              echo "should_build=true" >> $GITHUB_OUTPUT
-              echo "new_tag=$LATEST_UPSTREAM" >> $GITHUB_OUTPUT
-              
-              # Push the tag to our repo
-              git push origin "$LATEST_UPSTREAM"
-            fi
-          else
+          LATEST_TAG=$(git tag -l "cap-v*" --sort=-version:refname | head -n1)
+          echo "Latest tag: $LATEST_TAG"
+
+          if [ -z "$LATEST_TAG" ]; then
             echo "No cap-v* tags found"
-            echo "should_build=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Check if release already exists
+          if gh release view "$LATEST_TAG" >/dev/null 2>&1; then
+            echo "Release already exists for $LATEST_TAG"
+          else
+            echo "No release for $LATEST_TAG - build will be triggered by tag push"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  trigger-build:
-    needs: sync
-    if: needs.sync.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Trigger build workflow
-        run: |
-          gh workflow run auto-build-release.yml --ref "${{ needs.sync.outputs.new_tag }}"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
