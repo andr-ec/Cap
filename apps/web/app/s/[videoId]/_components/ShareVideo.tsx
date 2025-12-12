@@ -1,5 +1,4 @@
-import type { userSelectProps } from "@cap/database/auth/session";
-import type { comments as commentsSchema, videos } from "@cap/database/schema";
+import type { comments as commentsSchema } from "@cap/database/schema";
 import { NODE_ENV } from "@cap/env";
 import { Logo } from "@cap/ui";
 import type { ImageUpload } from "@cap/web-domain";
@@ -11,7 +10,6 @@ import {
 	useRef,
 	useState,
 } from "react";
-import type { OrganizationSettings } from "@/app/(org)/dashboard/dashboard-data";
 import { UpgradeModal } from "@/components/UpgradeModal";
 import type { VideoData } from "../types";
 import { CapVideoPlayer } from "./CapVideoPlayer";
@@ -105,7 +103,6 @@ export const ShareVideo = forwardRef<
 			}
 		}, [transcriptContent, transcriptError]);
 
-		// Handle subtitle URL creation
 		useEffect(() => {
 			if (
 				data.transcriptionStatus === "COMPLETE" &&
@@ -115,50 +112,47 @@ export const ShareVideo = forwardRef<
 				const vttContent = formatTranscriptAsVTT(transcriptData);
 				const blob = new Blob([vttContent], { type: "text/vtt" });
 				const newUrl = URL.createObjectURL(blob);
-
-				// Clean up previous URL
-				if (subtitleUrl) {
-					URL.revokeObjectURL(subtitleUrl);
-				}
-
-				setSubtitleUrl(newUrl);
+				setSubtitleUrl((prev) => {
+					if (prev) {
+						URL.revokeObjectURL(prev);
+					}
+					return newUrl;
+				});
 
 				return () => {
 					URL.revokeObjectURL(newUrl);
 				};
-			} else {
-				// Clean up if no longer needed
-				if (subtitleUrl) {
-					URL.revokeObjectURL(subtitleUrl);
-					setSubtitleUrl(null);
-				}
 			}
+			setSubtitleUrl((prev) => {
+				if (prev) {
+					URL.revokeObjectURL(prev);
+				}
+				return null;
+			});
 		}, [data.transcriptionStatus, transcriptData]);
 
-		// Handle chapters URL creation
 		useEffect(() => {
 			if (chapters?.length > 0) {
 				const vttContent = formatChaptersAsVTT(chapters);
 				const blob = new Blob([vttContent], { type: "text/vtt" });
 				const newUrl = URL.createObjectURL(blob);
-
-				// Clean up previous URL
-				if (chaptersUrl) {
-					URL.revokeObjectURL(chaptersUrl);
-				}
-
-				setChaptersUrl(newUrl);
+				setChaptersUrl((prev) => {
+					if (prev) {
+						URL.revokeObjectURL(prev);
+					}
+					return newUrl;
+				});
 
 				return () => {
 					URL.revokeObjectURL(newUrl);
 				};
-			} else {
-				// Clean up if no longer needed
-				if (chaptersUrl) {
-					URL.revokeObjectURL(chaptersUrl);
-					setChaptersUrl(null);
-				}
 			}
+			setChaptersUrl((prev) => {
+				if (prev) {
+					URL.revokeObjectURL(prev);
+				}
+				return null;
+			});
 		}, [chapters]);
 
 		const isMp4Source =

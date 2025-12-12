@@ -278,7 +278,7 @@ function Page() {
 							<IconCapSettings class="text-gray-11 size-5 hover:text-gray-12" />
 						</button>
 					</Tooltip>
-					<Tooltip content={<span>Previous Recordings</span>}>
+					<Tooltip content={<span>Recordings</span>}>
 						<button
 							type="button"
 							onClick={async () => {
@@ -334,7 +334,7 @@ function Page() {
 						<IconCapLogoFullDark class="hidden dark:block" />
 						<IconCapLogoFull class="block dark:hidden" />
 					</a>
-					<ErrorBoundary fallback={<></>}>
+					<ErrorBoundary fallback={null}>
 						<Suspense>
 							<span
 								onClick={async () => {

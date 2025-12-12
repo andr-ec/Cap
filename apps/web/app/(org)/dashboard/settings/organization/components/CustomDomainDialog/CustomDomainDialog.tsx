@@ -11,7 +11,7 @@ import { faGlobe, faRefresh } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { useMutation } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { toast } from "sonner";
 import { checkOrganizationDomain } from "@/actions/organization/check-domain";
 import { removeOrganizationDomain } from "@/actions/organization/remove-domain";
@@ -138,10 +138,12 @@ const CustomDomainDialog = ({
 	const router = useRouter();
 	const dialogRef = useRef<HTMLDivElement | null>(null);
 	const confettiRef = useRef<ConfettiRef>(null);
-
 	const pollInterval = useRef<NodeJS.Timeout | undefined>(undefined);
+	const checkDomainMutationRef = useRef<{
+		mutate: (args: { orgId: string; showToasts: boolean }) => void;
+		isPending: boolean;
+	} | null>(null);
 
-	// Mutation for updating domain
 	const updateDomainMutation = useMutation({
 		mutationFn: async ({
 			domain,
@@ -159,7 +161,7 @@ const CustomDomainDialog = ({
 			);
 		},
 		onSuccess: (data) => {
-			handleNext();
+			dispatch({ type: "NEXT_STEP" });
 			toast.success("Domain settings updated");
 			router.refresh();
 			if (data) {
@@ -175,7 +177,6 @@ const CustomDomainDialog = ({
 		},
 	});
 
-	// Mutation for checking domain verification
 	const checkDomainMutation = useMutation({
 		mutationFn: async ({
 			orgId,
@@ -196,10 +197,9 @@ const CustomDomainDialog = ({
 			setDomainConfig(data.config);
 
 			if (data.verified) {
-				handleNext();
+				dispatch({ type: "NEXT_STEP" });
 			}
 
-			// Only show toasts if explicitly requested
 			if (showToasts) {
 				if (data.verified) {
 					toast.success("Domain is verified!");
@@ -214,12 +214,17 @@ const CustomDomainDialog = ({
 				}
 			}
 		},
-		onError: (error, { showToasts }) => {
+		onError: (_error, { showToasts }) => {
 			if (showToasts) {
 				toast.error("Failed to check domain verification");
 			}
 		},
 	});
+
+	checkDomainMutationRef.current = {
+		mutate: checkDomainMutation.mutate,
+		isPending: checkDomainMutation.isPending,
+	};
 
 	const [stepState, dispatch] = useReducer(stepReducer, {
 		currentIndex: 0,
@@ -243,29 +248,48 @@ const CustomDomainDialog = ({
 	}));
 
 	const currentStep = steps[stepState.currentIndex];
-	const canGoNext = stepState.currentIndex < STEP_CONFIGS.length - 1;
 
-	if (!currentStep) {
-		return null;
-	}
-
-	// Step navigation handlers
-	const handleNext = () => {
-		if (canGoNext) {
-			dispatch({ type: "NEXT_STEP" });
-		}
-	};
+	const handleNext = useCallback(() => {
+		dispatch({ type: "NEXT_STEP" });
+	}, []);
 
 	const handleStepClick = (index: number) => {
 		dispatch({ type: "GO_TO_STEP", payload: index });
 	};
 
-	const handleReset = () => {
+	const handleReset = useCallback(() => {
 		dispatch({ type: "RESET" });
 		setDomain("");
-	};
+	}, []);
 
-	// Step-specific handlers
+	const handleClose = useCallback(() => {
+		handleReset();
+		onClose();
+	}, [handleReset, onClose]);
+
+	const checkVerification = useCallback(
+		(showToasts = true) => {
+			if (
+				!activeOrganization?.organization.id ||
+				!activeOrganization?.organization.customDomain
+			)
+				return;
+
+			checkDomainMutationRef.current?.mutate({
+				orgId: activeOrganization.organization.id,
+				showToasts,
+			});
+		},
+		[
+			activeOrganization?.organization.id,
+			activeOrganization?.organization.customDomain,
+		],
+	);
+
+	if (!currentStep) {
+		return null;
+	}
+
 	const handleDomainSubmit = async () => {
 		if (!domain.trim()) {
 			dispatch({
@@ -319,24 +343,6 @@ const CustomDomainDialog = ({
 		});
 	};
 
-	const checkVerification = async (showToasts = true) => {
-		if (
-			!activeOrganization?.organization.id ||
-			!activeOrganization?.organization.customDomain
-		)
-			return;
-
-		checkDomainMutation.mutate({
-			orgId: activeOrganization.organization.id,
-			showToasts,
-		});
-	};
-
-	const handleClose = () => {
-		handleReset();
-		onClose();
-	};
-
 	useEffect(() => {
 		//if current step is success, close dialog in 8 seconds
 		if (stepState.currentIndex === 2) {
@@ -346,7 +352,7 @@ const CustomDomainDialog = ({
 		} else if (isVerified) {
 			handleNext();
 		}
-	}, [isVerified, stepState.currentIndex]);
+	}, [isVerified, stepState.currentIndex, handleClose, handleNext]);
 
 	return (
 		<>
@@ -439,35 +445,30 @@ const CustomDomainDialog = ({
 								</Button>
 							)}
 
-							{currentStep.id === "domain" && (
-								<>
-									{user.isPro ? (
-										<Button
-											onClick={handleDomainSubmit}
-											size="sm"
-											spinner={updateDomainMutation.isPending}
-											disabled={
-												updateDomainMutation.isPending || !domain.trim()
-											}
-											variant="dark"
-											className="min-w-[100px]"
-										>
-											Next
-										</Button>
-									) : (
-										<Button
-											variant="blue"
-											size="sm"
-											onClick={() => {
-												setShowUpgradeModal(true);
-												handleClose();
-											}}
-										>
-											Upgrade To Cap Pro
-										</Button>
-									)}
-								</>
-							)}
+							{currentStep.id === "domain" &&
+								(user.isPro ? (
+									<Button
+										onClick={handleDomainSubmit}
+										size="sm"
+										spinner={updateDomainMutation.isPending}
+										disabled={updateDomainMutation.isPending || !domain.trim()}
+										variant="dark"
+										className="min-w-[100px]"
+									>
+										Next
+									</Button>
+								) : (
+									<Button
+										variant="blue"
+										size="sm"
+										onClick={() => {
+											setShowUpgradeModal(true);
+											handleClose();
+										}}
+									>
+										Upgrade To Cap Pro
+									</Button>
+								))}
 						</DialogFooter>
 					)}
 				</DialogContent>

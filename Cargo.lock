@@ -177,9 +177,9 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "aho-corasick"
-version = "1.1.3"
+version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e60d3430d3a69478ad0993f19238d2df97c507009a52b3c10addcd7f6bcb916"
+checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
 dependencies = [
  "memchr",
 ]
@@ -1172,8 +1172,9 @@ dependencies = [
 
 [[package]]
 name = "cap-desktop"
-version = "0.3.84"
+version = "0.4.0"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "async-stream",
  "axum",
@@ -1221,9 +1222,11 @@ dependencies = [
  "png 0.17.16",
  "posthog-rs",
  "rand 0.8.5",
+ "regex",
  "relative-path",
  "reqwest 0.12.24",
  "rodio",
+ "sanitize-filename",
  "scap-direct3d",
  "scap-screencapturekit",
  "scap-targets",
@@ -1304,6 +1307,8 @@ dependencies = [
  "cap-media-info",
  "cidre",
  "ffmpeg-next",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tracing",
  "workspace-hack",
@@ -1315,6 +1320,8 @@ version = "0.1.0"
 dependencies = [
  "cap-media-info",
  "ffmpeg-next",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tracing",
  "workspace-hack",
@@ -1395,6 +1402,21 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "specta",
+ "workspace-hack",
+]
+
+[[package]]
+name = "cap-frame-converter"
+version = "0.1.0"
+dependencies = [
+ "cap-media-info",
+ "crossbeam-channel",
+ "ffmpeg-next",
+ "flume",
+ "parking_lot",
+ "thiserror 1.0.69",
+ "tracing",
+ "windows 0.60.0",
  "workspace-hack",
 ]
 
@@ -1486,6 +1508,7 @@ dependencies = [
  "cap-enc-mediafoundation",
  "cap-fail",
  "cap-flags",
+ "cap-frame-converter",
  "cap-media",
  "cap-media-info",
  "cap-mediafoundation-ffmpeg",
@@ -1496,11 +1519,14 @@ dependencies = [
  "chrono",
  "cidre",
  "cocoa",
+ "core-foundation 0.10.1",
+ "core-graphics 0.24.0",
  "cpal 0.15.3 (git+https://github.com/CapSoftware/cpal?rev=3cc779a7b4ca)",
  "device_query",
  "either",
  "ffmpeg-next",
  "flume",
+ "foreign-types-shared 0.3.1",
  "futures",
  "hex",
  "image 0.25.8",
@@ -1598,12 +1624,14 @@ dependencies = [
 name = "cap-utils"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "directories 5.0.1",
  "flume",
  "futures",
  "nix 0.29.0",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "uuid",
@@ -7639,6 +7667,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sanitize-filename"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc984f4f9ceb736a7bb755c3e3bd17dc56370af2600c9780dcc48c66453da34d"
+dependencies = [
+ "regex",
+]
+
+[[package]]
 name = "scap-cpal"
 version = "0.1.0"
 dependencies = [
@@ -8496,6 +8533,7 @@ version = "2.0.0-rc.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ccbb212565d2dc177bc15ecb7b039d66c4490da892436a4eee5b394d620c9bc"
 dependencies = [
+ "chrono",
  "paste",
  "serde_json",
  "specta-macros",

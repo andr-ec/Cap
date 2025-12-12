@@ -1,19 +1,17 @@
 import { Button } from "@cap/ui-solid";
 import { createEventListener } from "@solid-primitives/event-listener";
 import { useNavigate } from "@solidjs/router";
-import { createMutation, useQuery } from "@tanstack/solid-query";
+import { createMutation, queryOptions, useQuery } from "@tanstack/solid-query";
+import { Channel } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
 	getAllWebviewWindows,
 	WebviewWindow,
 } from "@tauri-apps/api/webviewWindow";
-import {
-	getCurrentWindow,
-	LogicalSize,
-	primaryMonitor,
-} from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import * as dialog from "@tauri-apps/plugin-dialog";
 import { type as ostype } from "@tauri-apps/plugin-os";
+import * as shell from "@tauri-apps/plugin-shell";
 import * as updater from "@tauri-apps/plugin-updater";
 import { cx } from "cva";
 import {
@@ -26,20 +24,22 @@ import {
 	Show,
 	Suspense,
 } from "solid-js";
-import { reconcile } from "solid-js/store";
-// Removed solid-motionone in favor of solid-transition-group
+import { createStore, produce, reconcile } from "solid-js/store";
 import { Transition } from "solid-transition-group";
 import Mode from "~/components/Mode";
+import { RecoveryToast } from "~/components/RecoveryToast";
 import Tooltip from "~/components/Tooltip";
 import { Input } from "~/routes/editor/ui";
 import { authStore, generalSettingsStore } from "~/store";
 import { createSignInMutation } from "~/utils/auth";
+import { createTauriEventListener } from "~/utils/createEventListener";
 import {
 	createCameraMutation,
 	createCurrentRecordingQuery,
 	createLicenseQuery,
 	listAudioDevices,
 	listDisplaysWithThumbnails,
+	listRecordings,
 	listScreens,
 	listVideoDevices,
 	listWindows,
@@ -53,12 +53,20 @@ import {
 	type CaptureWindowWithThumbnail,
 	commands,
 	type DeviceOrModelID,
+	events,
 	type RecordingTargetMode,
 	type ScreenCaptureTarget,
+	type UploadProgress,
 } from "~/utils/tauri";
+import IconCapLogoFull from "~icons/cap/logo-full";
+import IconCapLogoFullDark from "~icons/cap/logo-full-dark";
+import IconCapSettings from "~icons/cap/settings";
 import IconLucideAppWindowMac from "~icons/lucide/app-window-mac";
 import IconLucideArrowLeft from "~icons/lucide/arrow-left";
+import IconLucideBug from "~icons/lucide/bug";
+import IconLucideImage from "~icons/lucide/image";
 import IconLucideSearch from "~icons/lucide/search";
+import IconLucideSquarePlay from "~icons/lucide/square-play";
 import IconMaterialSymbolsScreenshotFrame2Rounded from "~icons/material-symbols/screenshot-frame-2-rounded";
 import IconMdiMonitor from "~icons/mdi/monitor";
 import { WindowChromeHeader } from "../Context";
@@ -70,16 +78,12 @@ import CameraSelect from "./CameraSelect";
 import ChangelogButton from "./ChangeLogButton";
 import MicrophoneSelect from "./MicrophoneSelect";
 import SystemAudio from "./SystemAudio";
+import type { RecordingWithPath, ScreenshotWithPath } from "./TargetCard";
 import TargetDropdownButton from "./TargetDropdownButton";
 import TargetMenuGrid from "./TargetMenuGrid";
 import TargetTypeButton from "./TargetTypeButton";
 
-function getWindowSize() {
-	return {
-		width: 290,
-		height: 310,
-	};
-}
+const WINDOW_SIZE = { width: 290, height: 310 } as const;
 
 const findCamera = (cameras: CameraInfo[], id: DeviceOrModelID) => {
 	return cameras.find((c) => {
@@ -139,6 +143,22 @@ type TargetMenuPanelProps =
 			variant: "window";
 			targets?: CaptureWindowWithThumbnail[];
 			onSelect: (target: CaptureWindowWithThumbnail) => void;
+	  }
+	| {
+			variant: "recording";
+			targets?: RecordingWithPath[];
+			onSelect: (target: RecordingWithPath) => void;
+			onViewAll: () => void;
+			uploadProgress?: Record<string, number>;
+			reuploadingPaths?: Set<string>;
+			onReupload?: (path: string) => void;
+			onRefetch?: () => void;
+	  }
+	| {
+			variant: "screenshot";
+			targets?: ScreenshotWithPath[];
+			onSelect: (target: ScreenshotWithPath) => void;
+			onViewAll: () => void;
 	  };
 
 type SharedTargetMenuProps = {
@@ -153,11 +173,21 @@ function TargetMenuPanel(props: TargetMenuPanelProps & SharedTargetMenuProps) {
 	const trimmedSearch = createMemo(() => search().trim());
 	const normalizedQuery = createMemo(() => trimmedSearch().toLowerCase());
 	const placeholder =
-		props.variant === "display" ? "Search displays" : "Search windows";
+		props.variant === "display"
+			? "Search displays"
+			: props.variant === "window"
+				? "Search windows"
+				: props.variant === "recording"
+					? "Search recordings"
+					: "Search screenshots";
 	const noResultsMessage =
 		props.variant === "display"
 			? "No matching displays"
-			: "No matching windows";
+			: props.variant === "window"
+				? "No matching windows"
+				: props.variant === "recording"
+					? "No matching recordings"
+					: "No matching screenshots";
 
 	const filteredDisplayTargets = createMemo<CaptureDisplayWithThumbnail[]>(
 		() => {
@@ -190,6 +220,30 @@ function TargetMenuPanel(props: TargetMenuPanelProps & SharedTargetMenuProps) {
 				matchesQuery(target.owner_name) ||
 				matchesQuery(target.id),
 		);
+	});
+
+	const filteredRecordingTargets = createMemo<RecordingWithPath[]>(() => {
+		if (props.variant !== "recording") return [];
+		const query = normalizedQuery();
+		const targets = props.targets ?? [];
+		if (!query) return targets;
+
+		const matchesQuery = (value?: string | null) =>
+			!!value && value.toLowerCase().includes(query);
+
+		return targets.filter((target) => matchesQuery(target.pretty_name));
+	});
+
+	const filteredScreenshotTargets = createMemo<ScreenshotWithPath[]>(() => {
+		if (props.variant !== "screenshot") return [];
+		const query = normalizedQuery();
+		const targets = props.targets ?? [];
+		if (!query) return targets;
+
+		const matchesQuery = (value?: string | null) =>
+			!!value && value.toLowerCase().includes(query);
+
+		return targets.filter((target) => matchesQuery(target.pretty_name));
 	});
 
 	return (
@@ -239,7 +293,7 @@ function TargetMenuPanel(props: TargetMenuPanelProps & SharedTargetMenuProps) {
 							highlightQuery={trimmedSearch()}
 							emptyMessage={trimmedSearch() ? noResultsMessage : undefined}
 						/>
-					) : (
+					) : props.variant === "window" ? (
 						<TargetMenuGrid
 							variant="window"
 							targets={filteredWindowTargets()}
@@ -249,6 +303,34 @@ function TargetMenuPanel(props: TargetMenuPanelProps & SharedTargetMenuProps) {
 							disabled={props.disabled}
 							highlightQuery={trimmedSearch()}
 							emptyMessage={trimmedSearch() ? noResultsMessage : undefined}
+						/>
+					) : props.variant === "recording" ? (
+						<TargetMenuGrid
+							variant="recording"
+							targets={filteredRecordingTargets()}
+							isLoading={props.isLoading}
+							errorMessage={props.errorMessage}
+							onSelect={props.onSelect}
+							disabled={props.disabled}
+							highlightQuery={trimmedSearch()}
+							emptyMessage={trimmedSearch() ? noResultsMessage : undefined}
+							uploadProgress={props.uploadProgress}
+							reuploadingPaths={props.reuploadingPaths}
+							onReupload={props.onReupload}
+							onRefetch={props.onRefetch}
+							onViewAll={props.onViewAll}
+						/>
+					) : (
+						<TargetMenuGrid
+							variant="screenshot"
+							targets={filteredScreenshotTargets()}
+							isLoading={props.isLoading}
+							errorMessage={props.errorMessage}
+							onSelect={props.onSelect}
+							disabled={props.disabled}
+							highlightQuery={trimmedSearch()}
+							emptyMessage={trimmedSearch() ? noResultsMessage : undefined}
+							onViewAll={props.onViewAll}
 						/>
 					)}
 				</div>
@@ -326,9 +408,15 @@ function Page() {
 
 	const [displayMenuOpen, setDisplayMenuOpen] = createSignal(false);
 	const [windowMenuOpen, setWindowMenuOpen] = createSignal(false);
-	const activeMenu = createMemo<"display" | "window" | null>(() => {
+	const [recordingsMenuOpen, setRecordingsMenuOpen] = createSignal(false);
+	const [screenshotsMenuOpen, setScreenshotsMenuOpen] = createSignal(false);
+	const activeMenu = createMemo<
+		"display" | "window" | "recording" | "screenshot" | null
+	>(() => {
 		if (displayMenuOpen()) return "display";
 		if (windowMenuOpen()) return "window";
+		if (recordingsMenuOpen()) return "recording";
+		if (screenshotsMenuOpen()) return "screenshot";
 		return null;
 	});
 	const [hasOpenedDisplayMenu, setHasOpenedDisplayMenu] = createSignal(false);
@@ -346,6 +434,68 @@ function Page() {
 		...listWindowsWithThumbnails,
 		refetchInterval: false,
 	}));
+
+	const recordings = useQuery(() => listRecordings);
+
+	const [uploadProgress, setUploadProgress] = createStore<
+		Record<string, number>
+	>({});
+	const [reuploadingPaths, setReuploadingPaths] = createSignal<Set<string>>(
+		new Set(),
+	);
+
+	createTauriEventListener(events.uploadProgressEvent, (e) => {
+		if (e.uploaded === e.total) {
+			setUploadProgress(
+				produce((s) => {
+					delete s[e.video_id];
+				}),
+			);
+		} else {
+			const total = Number(e.total);
+			const progress = total > 0 ? (Number(e.uploaded) / total) * 100 : 0;
+			setUploadProgress(e.video_id, progress);
+		}
+	});
+
+	createTauriEventListener(events.recordingDeleted, () => recordings.refetch());
+
+	const handleReupload = async (path: string) => {
+		setReuploadingPaths((prev) => new Set([...prev, path]));
+		try {
+			await commands.uploadExportedVideo(
+				path,
+				"Reupload",
+				new Channel<UploadProgress>(() => {}),
+				null,
+			);
+		} finally {
+			setReuploadingPaths((prev) => {
+				const next = new Set(prev);
+				next.delete(path);
+				return next;
+			});
+			recordings.refetch();
+		}
+	};
+
+	const screenshots = useQuery(() =>
+		queryOptions<ScreenshotWithPath[]>({
+			queryKey: ["screenshots"],
+			queryFn: async () => {
+				const result = await commands
+					.listScreenshots()
+					.catch(() => [] as const);
+
+				return result.map(
+					([path, meta]) => ({ ...meta, path }) as ScreenshotWithPath,
+				);
+			},
+			refetchInterval: 2000,
+			reconcile: (old, next) => reconcile(next)(old),
+			initialData: [],
+		}),
+	);
 
 	const screens = useQuery(() => listScreens);
 	const windows = useQuery(() => listWindows);
@@ -377,6 +527,24 @@ function Page() {
 		const ids = existingWindowIds();
 		if (!ids) return windowTargets.data;
 		return windowTargets.data?.filter((target) => ids.has(target.id));
+	});
+
+	const recordingsData = createMemo(() => {
+		const data = recordings.data;
+		if (!data) return [];
+		// The Rust backend sorts files descending by creation time (newest first).
+		// See list_recordings in apps/desktop/src-tauri/src/lib.rs
+		// b_time.cmp(&a_time) ensures newest first.
+		// So we just need to take the top 20.
+		return data
+			.slice(0, 20)
+			.map(([path, meta]) => ({ ...meta, path }) as RecordingWithPath);
+	});
+
+	const screenshotsData = createMemo(() => {
+		const data = screenshots.data;
+		if (!data) return [];
+		return data.slice(0, 20) as ScreenshotWithPath[];
 	});
 
 	const displayMenuLoading = () =>
@@ -430,6 +598,8 @@ function Page() {
 		if (!isRecording()) return;
 		setDisplayMenuOpen(false);
 		setWindowMenuOpen(false);
+		setRecordingsMenuOpen(false);
+		setScreenshotsMenuOpen(false);
 	});
 
 	createUpdateCheck();
@@ -445,23 +615,24 @@ function Page() {
 
 		const currentWindow = getCurrentWindow();
 
-		const size = getWindowSize();
-		currentWindow.setSize(new LogicalSize(size.width, size.height));
+		currentWindow.setSize(
+			new LogicalSize(WINDOW_SIZE.width, WINDOW_SIZE.height),
+		);
 
 		const unlistenFocus = currentWindow.onFocusChanged(
 			({ payload: focused }) => {
 				if (focused) {
-					const size = getWindowSize();
-
-					currentWindow.setSize(new LogicalSize(size.width, size.height));
+					currentWindow.setSize(
+						new LogicalSize(WINDOW_SIZE.width, WINDOW_SIZE.height),
+					);
 				}
 			},
 		);
 
 		const unlistenResize = currentWindow.onResized(() => {
-			const size = getWindowSize();
-
-			currentWindow.setSize(new LogicalSize(size.width, size.height));
+			currentWindow.setSize(
+				new LogicalSize(WINDOW_SIZE.width, WINDOW_SIZE.height),
+			);
 		});
 
 		commands.updateAuthPlan();
@@ -470,9 +641,6 @@ function Page() {
 			(await unlistenFocus)?.();
 			(await unlistenResize)?.();
 		});
-
-		const monitor = await primaryMonitor();
-		if (!monitor) return;
 	});
 
 	const cameras = useQuery(() => listVideoDevices);
@@ -801,14 +969,38 @@ function Page() {
 								<IconCapSettings class="transition-colors text-gray-11 size-4 hover:text-gray-12" />
 							</button>
 						</Tooltip>
-						<Tooltip content={<span>Previous Recordings</span>}>
+						<Tooltip content={<span>Screenshots</span>}>
 							<button
 								type="button"
-								onClick={async () => {
-									await commands.showWindow({
-										Settings: { page: "recordings" },
+								onClick={() => {
+									setScreenshotsMenuOpen((prev) => {
+										const next = !prev;
+										if (next) {
+											setDisplayMenuOpen(false);
+											setWindowMenuOpen(false);
+											setRecordingsMenuOpen(false);
+										}
+										return next;
 									});
-									getCurrentWindow().hide();
+								}}
+								class="flex justify-center items-center size-5"
+							>
+								<IconLucideImage class="transition-colors text-gray-11 size-4 hover:text-gray-12" />
+							</button>
+						</Tooltip>
+						<Tooltip content={<span>Recordings</span>}>
+							<button
+								type="button"
+								onClick={() => {
+									setRecordingsMenuOpen((prev) => {
+										const next = !prev;
+										if (next) {
+											setDisplayMenuOpen(false);
+											setWindowMenuOpen(false);
+											setScreenshotsMenuOpen(false);
+										}
+										return next;
+									});
 								}}
 								class="flex justify-center items-center size-5"
 							>
@@ -848,7 +1040,7 @@ function Page() {
 							<IconCapLogoFullDark class="hidden dark:block" />
 							<IconCapLogoFull class="block dark:hidden" />
 						</a>
-						<ErrorBoundary fallback={<></>}>
+						<ErrorBoundary fallback={null}>
 							<Suspense>
 								<span
 									onClick={async () => {
@@ -910,7 +1102,7 @@ function Page() {
 										displayTriggerRef?.focus();
 									}}
 								/>
-							) : (
+							) : variant === "window" ? (
 								<TargetMenuPanel
 									variant="window"
 									targets={windowTargetsData()}
@@ -923,11 +1115,89 @@ function Page() {
 										windowTriggerRef?.focus();
 									}}
 								/>
+							) : variant === "recording" ? (
+								<TargetMenuPanel
+									variant="recording"
+									targets={recordingsData()}
+									isLoading={recordings.isPending}
+									errorMessage={
+										recordings.error ? "Failed to load recordings" : undefined
+									}
+									onSelect={async (recording) => {
+										if (recording.mode === "studio") {
+											let projectPath = recording.path;
+
+											const needsRecovery =
+												recording.status.status === "InProgress" ||
+												recording.status.status === "NeedsRemux";
+
+											if (needsRecovery) {
+												try {
+													projectPath =
+														await commands.recoverRecording(projectPath);
+												} catch (e) {
+													console.error("Failed to recover recording:", e);
+												}
+											}
+
+											await commands.showWindow({
+												Editor: { project_path: projectPath },
+											});
+										} else {
+											if (recording.sharing?.link) {
+												await shell.open(recording.sharing.link);
+											}
+										}
+										getCurrentWindow().hide();
+									}}
+									disabled={isRecording()}
+									onBack={() => {
+										setRecordingsMenuOpen(false);
+									}}
+									onViewAll={async () => {
+										await commands.showWindow({
+											Settings: { page: "recordings" },
+										});
+										getCurrentWindow().hide();
+									}}
+									uploadProgress={uploadProgress}
+									reuploadingPaths={reuploadingPaths()}
+									onReupload={handleReupload}
+									onRefetch={() => recordings.refetch()}
+								/>
+							) : (
+								<TargetMenuPanel
+									variant="screenshot"
+									targets={screenshotsData()}
+									isLoading={screenshots.isPending}
+									errorMessage={
+										screenshots.error ? "Failed to load screenshots" : undefined
+									}
+									onSelect={async (screenshot) => {
+										await commands.showWindow({
+											ScreenshotEditor: {
+												path: screenshot.path,
+											},
+										});
+										// getCurrentWindow().hide(); // Maybe keep open?
+									}}
+									disabled={isRecording()}
+									onBack={() => {
+										setScreenshotsMenuOpen(false);
+									}}
+									onViewAll={async () => {
+										await commands.showWindow({
+											Settings: { page: "screenshots" },
+										});
+										getCurrentWindow().hide();
+									}}
+								/>
 							)
 						}
 					</Show>
 				</Show>
 			</div>
+			<RecoveryToast />
 		</div>
 	);
 }

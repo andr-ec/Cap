@@ -21,6 +21,7 @@ export interface VideoStatusResult {
 	transcriptionStatus: TranscriptionStatus | null;
 	aiTitle: string | null;
 	aiProcessing: boolean;
+	aiGenerationSkipped: boolean;
 	summary: string | null;
 	chapters: { title: string; start: number }[] | null;
 	error?: string;
@@ -61,10 +62,10 @@ export async function getVideoStatus(
 			return {
 				transcriptionStatus: "PROCESSING",
 				aiProcessing: false,
+				aiGenerationSkipped: metadata.aiGenerationSkipped || false,
 				aiTitle: metadata.aiTitle || null,
 				summary: metadata.summary || null,
 				chapters: metadata.chapters || null,
-				// generationError: metadata.generationError || null,
 			};
 		} catch (error) {
 			console.error(
@@ -74,10 +75,10 @@ export async function getVideoStatus(
 			return {
 				transcriptionStatus: "ERROR",
 				aiProcessing: false,
+				aiGenerationSkipped: metadata.aiGenerationSkipped || false,
 				aiTitle: metadata.aiTitle || null,
 				summary: metadata.summary || null,
 				chapters: metadata.chapters || null,
-				// generationError: metadata.generationError || null,
 				error: "Failed to start transcription",
 			};
 		}
@@ -87,17 +88,17 @@ export async function getVideoStatus(
 		return {
 			transcriptionStatus: "ERROR",
 			aiProcessing: false,
+			aiGenerationSkipped: metadata.aiGenerationSkipped || false,
 			aiTitle: metadata.aiTitle || null,
 			summary: metadata.summary || null,
 			chapters: metadata.chapters || null,
-			// generationError: metadata.generationError || null,
 			error: "Transcription failed",
 		};
 	}
 
 	if (metadata.aiProcessing) {
 		const updatedAtTime = new Date(video.updatedAt).getTime();
-		const currentTime = new Date().getTime();
+		const currentTime = Date.now();
 
 		if (currentTime - updatedAtTime > MAX_AI_PROCESSING_TIME) {
 			console.log(
@@ -129,10 +130,10 @@ export async function getVideoStatus(
 					transcriptionStatus:
 						(updatedVideo.transcriptionStatus as TranscriptionStatus) || null,
 					aiProcessing: false,
+					aiGenerationSkipped: updatedMetadata.aiGenerationSkipped || false,
 					aiTitle: updatedMetadata.aiTitle || null,
 					summary: updatedMetadata.summary || null,
 					chapters: updatedMetadata.chapters || null,
-					// generationError: updatedMetadata.generationError || null,
 					error: "AI processing timed out and was reset",
 				};
 			}
@@ -142,9 +143,9 @@ export async function getVideoStatus(
 	if (
 		video.transcriptionStatus === "COMPLETE" &&
 		!metadata.aiProcessing &&
+		!metadata.aiGenerationSkipped &&
 		!metadata.summary &&
 		!metadata.chapters
-		// !metadata.generationError
 	) {
 		console.log(
 			`[Get Status] Transcription complete but no AI data, checking feature flag for video owner ${video.ownerId}`,
@@ -216,10 +217,10 @@ export async function getVideoStatus(
 				transcriptionStatus:
 					(video.transcriptionStatus as TranscriptionStatus) || null,
 				aiProcessing: true,
+				aiGenerationSkipped: false,
 				aiTitle: metadata.aiTitle || null,
 				summary: metadata.summary || null,
 				chapters: metadata.chapters || null,
-				// generationError: metadata.generationError || null,
 			};
 		} else {
 			const videoOwner = videoOwnerQuery[0];
@@ -233,9 +234,9 @@ export async function getVideoStatus(
 		transcriptionStatus:
 			(video.transcriptionStatus as TranscriptionStatus) || null,
 		aiProcessing: metadata.aiProcessing || false,
+		aiGenerationSkipped: metadata.aiGenerationSkipped || false,
 		aiTitle: metadata.aiTitle || null,
 		summary: metadata.summary || null,
 		chapters: metadata.chapters || null,
-		// generationError: metadata.generationError || null,
 	};
 }

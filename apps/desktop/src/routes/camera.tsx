@@ -96,11 +96,20 @@ function NativeCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 	});
 
 	createEffect(() => {
+		// Support for legacy size strings.
+		let currentSize = state.size as number | string;
+		if (typeof currentSize !== "number" || Number.isNaN(currentSize)) {
+			currentSize =
+				currentSize === "lg" ? CAMERA_PRESET_LARGE : CAMERA_DEFAULT_SIZE;
+			setState("size", currentSize);
+			return;
+		}
+
 		const clampedSize = Math.max(
 			CAMERA_MIN_SIZE,
-			Math.min(CAMERA_MAX_SIZE, state.size),
+			Math.min(CAMERA_MAX_SIZE, currentSize),
 		);
-		if (clampedSize !== state.size) {
+		if (clampedSize !== currentSize) {
 			setState("size", clampedSize);
 		}
 		commands.setCameraPreviewState(state);
@@ -110,7 +119,7 @@ function NativeCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 		commands.awaitCameraPreviewReady(),
 	);
 
-	const setCamera = createCameraMutation();
+	const _setCamera = createCameraMutation();
 
 	const scale = () => {
 		const normalized =
@@ -285,6 +294,17 @@ function LegacyCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 		{ name: "cameraWindowState" },
 	);
 
+	createEffect(() => {
+		// Support for legacy size strings.
+		const currentSize = state.size as number | string;
+		if (typeof currentSize !== "number" || Number.isNaN(currentSize)) {
+			setState(
+				"size",
+				currentSize === "lg" ? CAMERA_PRESET_LARGE : CAMERA_DEFAULT_SIZE,
+			);
+		}
+	});
+
 	const [isResizing, setIsResizing] = createSignal(false);
 	const [resizeStart, setResizeStart] = createSignal({
 		size: 0,
@@ -325,7 +345,7 @@ function LegacyCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 	}
 
 	const { cameraWsPort } = window.__CAP__;
-	const [isConnected, setIsConnected] = createSignal(false);
+	const [_isConnected, setIsConnected] = createSignal(false);
 	let ws: WebSocket | undefined;
 
 	const createSocket = () => {
@@ -487,7 +507,7 @@ function LegacyCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 		}
 	});
 
-	const [windowSize] = createResource(
+	const [_windowSize] = createResource(
 		() =>
 			[
 				state.size,
@@ -496,8 +516,6 @@ function LegacyCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 				frameDimensions()?.height,
 			] as const,
 		async ([size, shape, frameWidth, frameHeight]) => {
-			const monitor = await currentMonitor();
-
 			const BAR_HEIGHT = 56;
 			const base = Math.max(CAMERA_MIN_SIZE, Math.min(CAMERA_MAX_SIZE, size));
 			const aspect = frameWidth && frameHeight ? frameWidth / frameHeight : 1;
@@ -507,13 +525,15 @@ function LegacyCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 				shape === "full" ? (aspect >= 1 ? base : base / aspect) : base;
 			const totalHeight = windowHeight + BAR_HEIGHT;
 
-			if (!monitor) return;
+			const currentWindow = getCurrentWindow();
+			await currentWindow.setSize(new LogicalSize(windowWidth, totalHeight));
+
+			const monitor = await currentMonitor();
+			if (!monitor) return { size: base, windowWidth, windowHeight };
 
 			const scalingFactor = monitor.scaleFactor;
 			const width = monitor.size.width / scalingFactor - windowWidth - 100;
 			const height = monitor.size.height / scalingFactor - totalHeight - 100;
-
-			const currentWindow = getCurrentWindow();
 
 			if (!hasPositioned()) {
 				currentWindow.setPosition(
@@ -562,8 +582,6 @@ function LegacyCameraPreviewPage(props: { disconnected: Accessor<boolean> }) {
 					await currentWindow.setPosition(new LogicalPosition(newX, newY));
 				}
 			}
-
-			await currentWindow.setSize(new LogicalSize(windowWidth, totalHeight));
 
 			return { width, height, size: base, windowWidth, windowHeight };
 		},

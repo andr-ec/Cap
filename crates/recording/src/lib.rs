@@ -1,8 +1,12 @@
+pub mod benchmark;
 mod capture_pipeline;
 pub mod cursor;
 pub mod feeds;
+pub mod fragmentation;
 pub mod instant_recording;
 mod output_pipeline;
+pub mod recovery;
+pub mod screenshot;
 pub mod sources;
 pub mod studio_recording;
 
@@ -19,12 +23,13 @@ use thiserror::Error;
 
 use crate::{feeds::camera::CameraFeedLock, sources::screen_capture::ScreenCaptureTarget};
 
-#[derive(specta::Type, Serialize, Deserialize, Clone, Debug, Copy, Default)]
+#[derive(specta::Type, Serialize, Deserialize, Clone, Debug, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum RecordingMode {
     #[default]
     Studio,
     Instant,
+    Screenshot,
 }
 
 #[derive(specta::Type, Serialize, Deserialize, Clone, Debug)]

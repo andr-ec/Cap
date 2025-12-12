@@ -23,7 +23,7 @@ import {
 	type RecordingMode,
 	type ScreenCaptureTarget,
 } from "./tauri";
-import { apiClient, orgCustomDomainClient, protectedHeaders } from "./web-api";
+import { orgCustomDomainClient, protectedHeaders } from "./web-api";
 
 export const listWindows = queryOptions({
 	queryKey: ["capture", "windows"] as const,
@@ -76,6 +76,14 @@ export const listDisplaysWithThumbnails = queryOptions({
 const getCurrentRecording = queryOptions({
 	queryKey: ["currentRecording"] as const,
 	queryFn: () => commands.getCurrentRecording().then((d) => d[0]),
+});
+
+export const listRecordings = queryOptions({
+	queryKey: ["recordings"] as const,
+	queryFn: async () => {
+		return await commands.listRecordings();
+	},
+	initialData: [],
 });
 
 export const listVideoDevices = queryOptions({

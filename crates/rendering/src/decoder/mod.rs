@@ -17,6 +17,14 @@ pub struct DecodedFrame {
 }
 
 impl DecodedFrame {
+    pub fn new(data: Vec<u8>, width: u32, height: u32) -> Self {
+        Self {
+            data: Arc::new(data),
+            width,
+            height,
+        }
+    }
+
     pub fn data(&self) -> &[u8] {
         &self.data
     }
@@ -39,7 +47,7 @@ pub fn pts_to_frame(pts: i64, time_base: Rational, fps: u32) -> u32 {
         .round() as u32
 }
 
-pub const FRAME_CACHE_SIZE: usize = 100;
+pub const FRAME_CACHE_SIZE: usize = 500;
 
 #[derive(Clone)]
 pub struct AsyncVideoDecoderHandle {
@@ -72,6 +80,8 @@ pub async fn spawn_decoder(
 
     let handle = AsyncVideoDecoderHandle { sender: tx, offset };
 
+    let path_display = path.display().to_string();
+
     if cfg!(target_os = "macos") {
         #[cfg(target_os = "macos")]
         avassetreader::AVAssetReaderDecoder::spawn(name, path, fps, rx, ready_tx);
@@ -80,5 +90,12 @@ pub async fn spawn_decoder(
             .map_err(|e| format!("'{name}' decoder / {e}"))?;
     }
 
-    ready_rx.await.map_err(|e| e.to_string())?.map(|()| handle)
+    match tokio::time::timeout(std::time::Duration::from_secs(30), ready_rx).await {
+        Ok(result) => result
+            .map_err(|e| format!("'{name}' decoder channel closed: {e}"))?
+            .map(|()| handle),
+        Err(_) => Err(format!(
+            "'{name}' decoder timed out after 30s initializing: {path_display}"
+        )),
+    }
 }

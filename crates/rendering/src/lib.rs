@@ -1,7 +1,7 @@
 use anyhow::Result;
 use cap_project::{
     AspectRatio, CameraShape, CameraXPosition, CameraYPosition, ClipOffsets, CornerStyle, Crop,
-    CursorEvents, ProjectConfiguration, RecordingMeta, StudioRecordingMeta, XY,
+    CursorEvents, MaskKind, ProjectConfiguration, RecordingMeta, StudioRecordingMeta, XY,
 };
 use composite_frame::CompositeVideoFrameUniforms;
 use core::f64;
@@ -12,6 +12,7 @@ use futures::FutureExt;
 use futures::future::OptionFuture;
 use layers::{
     Background, BackgroundLayer, BlurLayer, CameraLayer, CaptionsLayer, CursorLayer, DisplayLayer,
+    MaskLayer, TextLayer,
 };
 use specta::Type;
 use spring_mass_damper::SpringMassDamperSimulationConfig;
@@ -26,17 +27,21 @@ mod cursor_interpolation;
 pub mod decoder;
 mod frame_pipeline;
 mod layers;
+mod mask;
 mod project_recordings;
 mod scene;
 mod spring_mass_damper;
+mod text;
 mod zoom;
 
 pub use coord::*;
 pub use decoder::DecodedFrame;
 pub use frame_pipeline::RenderedFrame;
-pub use project_recordings::{ProjectRecordingsMeta, SegmentRecordings};
+pub use project_recordings::{ProjectRecordingsMeta, SegmentRecordings, Video};
 
+use mask::interpolate_masks;
 use scene::*;
+use text::{PreparedText, prepare_texts};
 use zoom::*;
 
 const STANDARD_CURSOR_HEIGHT: f32 = 75.0;
@@ -52,6 +57,42 @@ fn rounding_type_value(style: CornerStyle) -> f32 {
 pub struct RenderOptions {
     pub camera_size: Option<XY<u32>>,
     pub screen_size: XY<u32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum MaskRenderMode {
+    Sensitive,
+    Highlight,
+}
+
+impl MaskRenderMode {
+    fn from_kind(kind: MaskKind) -> Self {
+        match kind {
+            MaskKind::Sensitive => MaskRenderMode::Sensitive,
+            MaskKind::Highlight => MaskRenderMode::Highlight,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedMask {
+    pub center: XY<f32>,
+    pub size: XY<f32>,
+    pub feather: f32,
+    pub opacity: f32,
+    pub pixel_size: f32,
+    pub darkness: f32,
+    pub mode: MaskRenderMode,
+    pub output_size: XY<u32>,
+}
+
+impl PreparedMask {
+    fn mode_value(&self) -> u32 {
+        match self.mode {
+            MaskRenderMode::Sensitive => 0,
+            MaskRenderMode::Highlight => 1,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -170,6 +211,8 @@ impl RecordingSegmentDecoders {
 pub enum RenderingError {
     #[error("No GPU adapter found")]
     NoAdapter,
+    #[error("No segments available in recording")]
+    NoSegments,
     #[error(transparent)]
     RequestDeviceFailed(#[from] wgpu::RequestDeviceError),
     #[error("Failed to wait for buffer mapping")]
@@ -325,9 +368,11 @@ impl RenderVideoConstants {
         recording_meta: RecordingMeta,
         meta: StudioRecordingMeta,
     ) -> Result<Self, RenderingError> {
+        let first_segment = segments.first().ok_or(RenderingError::NoSegments)?;
+
         let options = RenderOptions {
-            screen_size: XY::new(segments[0].display.width, segments[0].display.height),
-            camera_size: segments[0]
+            screen_size: XY::new(first_segment.display.width, first_segment.display.height),
+            camera_size: first_segment
                 .camera
                 .as_ref()
                 .map(|c| XY::new(c.width, c.height)),
@@ -382,6 +427,8 @@ pub struct ProjectUniforms {
     pub resolution_base: XY<u32>,
     pub display_parent_motion_px: XY<f32>,
     pub motion_blur_amount: f32,
+    pub masks: Vec<PreparedMask>,
+    pub texts: Vec<PreparedText>,
 }
 
 #[derive(Debug, Clone)]
@@ -691,15 +738,11 @@ impl ProjectUniforms {
         basis as f64 * padding_factor
     }
 
-    pub fn get_output_size(
-        options: &RenderOptions,
-        project: &ProjectConfiguration,
-        resolution_base: XY<u32>,
-    ) -> (u32, u32) {
+    pub fn get_base_size(options: &RenderOptions, project: &ProjectConfiguration) -> (u32, u32) {
         let crop = Self::get_crop(options, project);
         let crop_aspect = crop.aspect_ratio();
 
-        let (base_width, base_height) = match &project.aspect_ratio {
+        match &project.aspect_ratio {
             None => {
                 let padding_basis = u32::max(crop.size.x, crop.size.y) as f64;
                 let padding =
@@ -744,7 +787,15 @@ impl ProjectUniforms {
                     (crop.size.x, ((crop.size.x as f32 * 4.0 / 3.0) as u32))
                 }
             }
-        };
+        }
+    }
+
+    pub fn get_output_size(
+        options: &RenderOptions,
+        project: &ProjectConfiguration,
+        resolution_base: XY<u32>,
+    ) -> (u32, u32) {
+        let (base_width, base_height) = Self::get_base_size(options, project);
 
         let width_scale = resolution_base.x as f32 / base_width as f32;
         let height_scale = resolution_base.y as f32 / base_height as f32;
@@ -1168,7 +1219,7 @@ impl ProjectUniforms {
                             (b.opacity / 100.0).clamp(0.0, 1.0),
                         ]
                     } else {
-                        [1.0, 1.0, 1.0, 0.8]
+                        [0.0, 0.0, 0.0, 0.0]
                     },
                     _padding2: [0.0; 4],
                 },
@@ -1183,6 +1234,10 @@ impl ProjectUniforms {
                 let output_size = [output_size.0 as f32, output_size.1 as f32];
                 let frame_size = [camera_size.x as f32, camera_size.y as f32];
                 let min_axis = output_size[0].min(output_size[1]);
+
+                const BASE_HEIGHT: f32 = 1080.0;
+                let resolution_scale = output_size[1] / BASE_HEIGHT;
+                let camera_padding = CAMERA_PADDING * resolution_scale;
 
                 let base_size = project.camera.size / 100.0;
                 let zoom_size = project
@@ -1200,19 +1255,19 @@ impl ProjectUniforms {
                     CameraShape::Source => {
                         if aspect >= 1.0 {
                             [
-                                (min_axis * scale + CAMERA_PADDING) * aspect,
-                                min_axis * scale + CAMERA_PADDING,
+                                (min_axis * scale + camera_padding) * aspect,
+                                min_axis * scale + camera_padding,
                             ]
                         } else {
                             [
-                                min_axis * scale + CAMERA_PADDING,
-                                (min_axis * scale + CAMERA_PADDING) / aspect,
+                                min_axis * scale + camera_padding,
+                                (min_axis * scale + camera_padding) / aspect,
                             ]
                         }
                     }
                     CameraShape::Square => [
-                        min_axis * scale + CAMERA_PADDING,
-                        min_axis * scale + CAMERA_PADDING,
+                        min_axis * scale + camera_padding,
+                        min_axis * scale + camera_padding,
                     ],
                 };
 
@@ -1221,14 +1276,14 @@ impl ProjectUniforms {
 
                 let position_for = |subject_size: [f32; 2]| {
                     let x = match &project.camera.position.x {
-                        CameraXPosition::Left => CAMERA_PADDING,
+                        CameraXPosition::Left => camera_padding,
                         CameraXPosition::Center => output_size[0] / 2.0 - subject_size[0] / 2.0,
-                        CameraXPosition::Right => output_size[0] - CAMERA_PADDING - subject_size[0],
+                        CameraXPosition::Right => output_size[0] - camera_padding - subject_size[0],
                     };
                     let y = match &project.camera.position.y {
-                        CameraYPosition::Top => CAMERA_PADDING,
+                        CameraYPosition::Top => camera_padding,
                         CameraYPosition::Bottom => {
-                            output_size[1] - subject_size[1] - CAMERA_PADDING
+                            output_size[1] - subject_size[1] - camera_padding
                         }
                     };
 
@@ -1417,6 +1472,31 @@ impl ProjectUniforms {
                 }
             });
 
+        let masks = project
+            .timeline
+            .as_ref()
+            .map(|timeline| {
+                interpolate_masks(
+                    XY::new(output_size.0, output_size.1),
+                    frame_time as f64,
+                    &timeline.mask_segments,
+                )
+            })
+            .unwrap_or_default();
+
+        let texts = project
+            .timeline
+            .as_ref()
+            .map(|timeline| {
+                prepare_texts(
+                    XY::new(output_size.0, output_size.1),
+                    frame_time as f64,
+                    &timeline.text_segments,
+                    &project.hidden_text_segments,
+                )
+            })
+            .unwrap_or_default();
+
         Self {
             output_size,
             cursor_size: project.cursor.size as f32,
@@ -1432,6 +1512,8 @@ impl ProjectUniforms {
             prev_cursor: prev_interpolated_cursor,
             display_parent_motion_px: display_motion_parent,
             motion_blur_amount: user_motion_blur,
+            masks,
+            texts,
         }
     }
 }
@@ -1496,7 +1578,8 @@ pub struct RendererLayers {
     cursor: CursorLayer,
     camera: CameraLayer,
     camera_only: CameraLayer,
-    #[allow(unused)]
+    mask: MaskLayer,
+    text: TextLayer,
     captions: CaptionsLayer,
 }
 
@@ -1509,6 +1592,8 @@ impl RendererLayers {
             cursor: CursorLayer::new(device),
             camera: CameraLayer::new(device),
             camera_only: CameraLayer::new(device),
+            mask: MaskLayer::new(device),
+            text: TextLayer::new(device, queue),
             captions: CaptionsLayer::new(device, queue),
         }
     }
@@ -1573,12 +1658,27 @@ impl RendererLayers {
             })(),
         );
 
+        self.text.prepare(
+            &constants.device,
+            &constants.queue,
+            uniforms.output_size,
+            &uniforms.texts,
+        );
+
+        self.captions.prepare(
+            uniforms,
+            segment_frames,
+            XY::new(uniforms.output_size.0, uniforms.output_size.1),
+            constants,
+        );
+
         Ok(())
     }
 
     pub fn render(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         session: &mut RenderSession,
         uniforms: &ProjectUniforms,
@@ -1640,6 +1740,22 @@ impl RendererLayers {
         {
             let mut pass = render_pass!(session.current_texture_view(), wgpu::LoadOp::Load);
             self.camera.render(&mut pass);
+        }
+
+        if !uniforms.masks.is_empty() {
+            for mask in &uniforms.masks {
+                self.mask.render(device, queue, session, encoder, mask);
+            }
+        }
+
+        if !uniforms.texts.is_empty() {
+            let mut pass = render_pass!(session.current_texture_view(), wgpu::LoadOp::Load);
+            self.text.render(&mut pass);
+        }
+
+        if self.captions.has_content() {
+            let mut pass = render_pass!(session.current_texture_view(), wgpu::LoadOp::Load);
+            self.captions.render(&mut pass);
         }
     }
 }
@@ -1803,7 +1919,13 @@ async fn produce_frame(
         }),
     );
 
-    layers.render(&constants.device, &mut encoder, session, &uniforms);
+    layers.render(
+        &constants.device,
+        &constants.queue,
+        &mut encoder,
+        session,
+        &uniforms,
+    );
 
     finish_encoder(
         session,

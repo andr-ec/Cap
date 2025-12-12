@@ -1,10 +1,12 @@
 use std::{
     env::temp_dir,
+    fmt,
     ops::{Add, Div, Mul, Sub, SubAssign},
     path::Path,
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use specta::Type;
 
 #[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
@@ -111,17 +113,6 @@ impl<T: Sub<Output = T> + Copy> Sub<T> for XY<T> {
     }
 }
 
-impl<T: Mul<Output = T> + Copy> Mul<T> for XY<T> {
-    type Output = Self;
-
-    fn mul(self, other: T) -> Self {
-        Self {
-            x: self.x * other,
-            y: self.y * other,
-        }
-    }
-}
-
 impl<T: Mul<Output = T> + Copy> Mul<XY<T>> for XY<T> {
     type Output = Self;
 
@@ -129,6 +120,17 @@ impl<T: Mul<Output = T> + Copy> Mul<XY<T>> for XY<T> {
         Self {
             x: self.x * other.x,
             y: self.y * other.y,
+        }
+    }
+}
+
+impl<T: Mul<Output = T> + Copy> Mul<T> for XY<T> {
+    type Output = Self;
+
+    fn mul(self, other: T) -> Self {
+        Self {
+            x: self.x * other,
+            y: self.y * other,
         }
     }
 }
@@ -289,21 +291,23 @@ pub struct CameraPosition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct Camera {
     pub hide: bool,
     pub mirror: bool,
     pub position: CameraPosition,
     pub size: f32,
+    #[serde(alias = "zoom_size")]
     pub zoom_size: Option<f32>,
     #[serde(default = "Camera::default_rounding")]
     pub rounding: f32,
     #[serde(default)]
     pub shadow: f32,
-    #[serde(default)]
+    #[serde(alias = "advanced_shadow", default)]
     pub advanced_shadow: Option<ShadowConfiguration>,
     #[serde(default)]
     pub shape: CameraShape,
-    #[serde(default)]
+    #[serde(alias = "rounding_type", default)]
     pub rounding_type: CornerStyle,
 }
 
@@ -390,10 +394,11 @@ impl Default for AudioConfiguration {
     }
 }
 
-#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum CursorType {
     #[default]
+    Auto,
     Pointer,
     Circle,
 }
@@ -495,6 +500,10 @@ impl CursorConfiguration {
     fn default_hide_when_idle_delay() -> f32 {
         2.0
     }
+
+    pub fn cursor_type(&self) -> &CursorType {
+        &self.r#type
+    }
 }
 
 #[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
@@ -544,6 +553,130 @@ pub enum ZoomMode {
     Manual { x: f32, y: f32 },
 }
 
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum MaskKind {
+    Sensitive,
+    Highlight,
+}
+
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MaskScalarKeyframe {
+    pub time: f64,
+    pub value: f64,
+}
+
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MaskVectorKeyframe {
+    pub time: f64,
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MaskKeyframes {
+    #[serde(default)]
+    pub position: Vec<MaskVectorKeyframe>,
+    #[serde(default)]
+    pub size: Vec<MaskVectorKeyframe>,
+    #[serde(default)]
+    pub intensity: Vec<MaskScalarKeyframe>,
+}
+
+#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct MaskSegment {
+    pub start: f64,
+    pub end: f64,
+    #[serde(default = "MaskSegment::default_enabled")]
+    pub enabled: bool,
+    pub mask_type: MaskKind,
+    pub center: XY<f64>,
+    pub size: XY<f64>,
+    #[serde(default)]
+    pub feather: f64,
+    #[serde(default = "MaskSegment::default_opacity")]
+    pub opacity: f64,
+    #[serde(default)]
+    pub pixelation: f64,
+    #[serde(default)]
+    pub darkness: f64,
+    #[serde(default)]
+    pub keyframes: MaskKeyframes,
+}
+
+impl MaskSegment {
+    fn default_enabled() -> bool {
+        true
+    }
+
+    fn default_opacity() -> f64 {
+        1.0
+    }
+}
+
+#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TextSegment {
+    pub start: f64,
+    pub end: f64,
+    #[serde(default = "TextSegment::default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "TextSegment::default_content")]
+    pub content: String,
+    #[serde(default = "TextSegment::default_center")]
+    pub center: XY<f64>,
+    #[serde(default = "TextSegment::default_size")]
+    pub size: XY<f64>,
+    #[serde(default = "TextSegment::default_font_family")]
+    pub font_family: String,
+    #[serde(default = "TextSegment::default_font_size")]
+    pub font_size: f32,
+    #[serde(default = "TextSegment::default_font_weight")]
+    pub font_weight: f32,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default = "TextSegment::default_color")]
+    pub color: String,
+}
+
+impl TextSegment {
+    fn default_enabled() -> bool {
+        true
+    }
+
+    fn default_content() -> String {
+        "Text".to_string()
+    }
+
+    fn default_center() -> XY<f64> {
+        XY::new(0.5, 0.5)
+    }
+
+    fn default_size() -> XY<f64> {
+        XY::new(0.35, 0.2)
+    }
+
+    fn default_font_family() -> String {
+        "sans-serif".to_string()
+    }
+
+    fn default_font_size() -> f32 {
+        48.0
+    }
+
+    fn default_font_weight() -> f32 {
+        700.0
+    }
+
+    fn default_color() -> String {
+        "#ffffff".to_string()
+    }
+}
+
 #[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum SceneMode {
@@ -569,6 +702,10 @@ pub struct TimelineConfiguration {
     pub zoom_segments: Vec<ZoomSegment>,
     #[serde(default)]
     pub scene_segments: Vec<SceneSegment>,
+    #[serde(default)]
+    pub mask_segments: Vec<MaskSegment>,
+    #[serde(default)]
+    pub text_segments: Vec<TextSegment>,
 }
 
 impl TimelineConfiguration {
@@ -597,11 +734,33 @@ pub const WALLPAPERS_PATH: &str = "assets/backgrounds/macOS";
 
 #[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct CaptionWord {
+    pub text: String,
+    pub start: f32,
+    pub end: f32,
+}
+
+#[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct CaptionSegment {
     pub id: String,
     pub start: f32,
     pub end: f32,
     pub text: String,
+    #[serde(default)]
+    pub words: Vec<CaptionWord>,
+}
+
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptionPosition {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    #[default]
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
 }
 
 #[derive(Type, Serialize, Deserialize, Clone, Debug)]
@@ -615,6 +774,7 @@ pub struct CaptionSettings {
     pub background_color: String,
     #[serde(alias = "backgroundOpacity")]
     pub background_opacity: u32,
+    #[serde(default)]
     pub position: String,
     pub bold: bool,
     pub italic: bool,
@@ -623,6 +783,44 @@ pub struct CaptionSettings {
     pub outline_color: String,
     #[serde(alias = "exportWithSubtitles")]
     pub export_with_subtitles: bool,
+    #[serde(
+        alias = "highlightColor",
+        default = "CaptionSettings::default_highlight_color"
+    )]
+    pub highlight_color: String,
+    #[serde(
+        alias = "fadeDuration",
+        default = "CaptionSettings::default_fade_duration"
+    )]
+    pub fade_duration: f32,
+    #[serde(
+        alias = "lingerDuration",
+        default = "CaptionSettings::default_linger_duration"
+    )]
+    pub linger_duration: f32,
+    #[serde(
+        alias = "wordTransitionDuration",
+        default = "CaptionSettings::default_word_transition_duration"
+    )]
+    pub word_transition_duration: f32,
+}
+
+impl CaptionSettings {
+    fn default_highlight_color() -> String {
+        "#FFFFFF".to_string()
+    }
+
+    fn default_fade_duration() -> f32 {
+        0.15
+    }
+
+    fn default_linger_duration() -> f32 {
+        0.4
+    }
+
+    fn default_word_transition_duration() -> f32 {
+        0.25
+    }
 }
 
 impl Default for CaptionSettings {
@@ -631,15 +829,19 @@ impl Default for CaptionSettings {
             enabled: false,
             font: "System Sans-Serif".to_string(),
             size: 24,
-            color: "#FFFFFF".to_string(),
+            color: "#A0A0A0".to_string(),
             background_color: "#000000".to_string(),
-            background_opacity: 80,
-            position: "bottom".to_string(),
-            bold: true,
+            background_opacity: 90,
+            position: "bottom-center".to_string(),
+            bold: false,
             italic: false,
             outline: true,
             outline_color: "#000000".to_string(),
             export_with_subtitles: false,
+            highlight_color: Self::default_highlight_color(),
+            fade_duration: Self::default_fade_duration(),
+            linger_duration: Self::default_linger_duration(),
+            word_transition_duration: Self::default_word_transition_duration(),
         }
     }
 }
@@ -668,6 +870,127 @@ pub struct ClipConfiguration {
     pub offsets: ClipOffsets,
 }
 
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum AnnotationType {
+    Arrow,
+    Circle,
+    Rectangle,
+    Text,
+    Mask,
+}
+
+#[derive(Type, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum MaskType {
+    Blur,
+    Pixelate,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum AnnotationValidationError {
+    MaskTypeMissing {
+        id: String,
+    },
+    MaskLevelMissing {
+        id: String,
+    },
+    MaskLevelInvalid {
+        id: String,
+        level: f64,
+    },
+    MaskDataNotAllowed {
+        id: String,
+        annotation_type: AnnotationType,
+    },
+}
+
+impl fmt::Display for AnnotationValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MaskTypeMissing { id } => {
+                write!(f, "annotation {id} of type mask is missing maskType")
+            }
+            Self::MaskLevelMissing { id } => {
+                write!(f, "annotation {id} of type mask is missing maskLevel")
+            }
+            Self::MaskLevelInvalid { id, level } => {
+                write!(f, "annotation {id} has invalid maskLevel {level}")
+            }
+            Self::MaskDataNotAllowed {
+                id,
+                annotation_type,
+            } => write!(
+                f,
+                "annotation {id} with type {annotation_type:?} cannot include mask data"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AnnotationValidationError {}
+
+#[derive(Type, Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Annotation {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub annotation_type: AnnotationType,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub stroke_color: String,
+    pub stroke_width: f64,
+    pub fill_color: String,
+    pub opacity: f64,
+    pub rotation: f64,
+    pub text: Option<String>,
+    #[serde(default)]
+    pub mask_type: Option<MaskType>,
+    #[serde(default)]
+    pub mask_level: Option<f64>,
+}
+
+impl Annotation {
+    pub fn validate(&self) -> Result<(), AnnotationValidationError> {
+        match self.annotation_type {
+            AnnotationType::Mask => {
+                if self.mask_type.is_none() {
+                    return Err(AnnotationValidationError::MaskTypeMissing {
+                        id: self.id.clone(),
+                    });
+                }
+
+                let level =
+                    self.mask_level
+                        .ok_or_else(|| AnnotationValidationError::MaskLevelMissing {
+                            id: self.id.clone(),
+                        })?;
+
+                if !level.is_finite() || level <= 0.0 {
+                    return Err(AnnotationValidationError::MaskLevelInvalid {
+                        id: self.id.clone(),
+                        level,
+                    });
+                }
+
+                Ok(())
+            }
+            _ => {
+                if self.mask_type.is_some() || self.mask_level.is_some() {
+                    return Err(AnnotationValidationError::MaskDataNotAllowed {
+                        id: self.id.clone(),
+                        annotation_type: self.annotation_type,
+                    });
+                }
+
+                Ok(())
+            }
+        }
+    }
+}
+
 #[derive(Type, Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectConfiguration {
@@ -683,18 +1006,65 @@ pub struct ProjectConfiguration {
     pub captions: Option<CaptionsData>,
     #[serde(default)]
     pub clips: Vec<ClipConfiguration>,
+    #[serde(default)]
+    pub annotations: Vec<Annotation>,
+    #[serde(default, skip_serializing)]
+    pub hidden_text_segments: Vec<usize>,
+}
+
+fn camera_config_needs_migration(value: &Value) -> bool {
+    value
+        .get("camera")
+        .and_then(|camera| camera.as_object())
+        .is_some_and(|camera| {
+            camera.contains_key("zoom_size")
+                || camera.contains_key("advanced_shadow")
+                || camera.contains_key("rounding_type")
+        })
 }
 
 impl ProjectConfiguration {
+    pub fn validate(&self) -> Result<(), AnnotationValidationError> {
+        for annotation in &self.annotations {
+            annotation.validate()?;
+        }
+
+        Ok(())
+    }
+
     pub fn load(project_path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
-        let config_str =
-            std::fs::read_to_string(project_path.as_ref().join("project-config.json"))?;
-        let config: Self = serde_json::from_str(&config_str).unwrap_or_default();
+        let project_path = project_path.as_ref();
+        let config_path = project_path.join("project-config.json");
+        let config_str = std::fs::read_to_string(&config_path)?;
+        let parsed_value = serde_json::from_str::<Value>(&config_str).ok();
+        let config: Self = serde_json::from_str(&config_str)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        config
+            .validate()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+
+        if parsed_value
+            .as_ref()
+            .map(camera_config_needs_migration)
+            .unwrap_or(false)
+        {
+            match config.write(project_path) {
+                Ok(_) => {
+                    eprintln!("Updated project-config.json camera keys to camelCase");
+                }
+                Err(error) => {
+                    eprintln!("Failed to migrate project-config.json: {error}");
+                }
+            }
+        }
 
         Ok(config)
     }
 
     pub fn write(&self, project_path: impl AsRef<Path>) -> Result<(), std::io::Error> {
+        self.validate()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+
         let temp_path = temp_dir().join(uuid::Uuid::new_v4().to_string());
 
         // Write to temporary file first to ensure readers don't see partial files

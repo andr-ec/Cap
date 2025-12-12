@@ -8,7 +8,8 @@ import {
 } from "@tanstack/solid-query";
 import { Channel } from "@tauri-apps/api/core";
 import { CheckMenuItem, Menu } from "@tauri-apps/api/menu";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { ask, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { remove } from "@tauri-apps/plugin-fs";
 import { cx } from "cva";
 import {
 	createEffect,
@@ -31,7 +32,7 @@ import Tooltip from "~/components/Tooltip";
 import { authStore } from "~/store";
 import { trackEvent } from "~/utils/analytics";
 import { createSignInMutation } from "~/utils/auth";
-import { exportVideo } from "~/utils/export";
+import { createExportTask } from "~/utils/export";
 import { createOrganizationsQuery } from "~/utils/queries";
 import {
 	commands,
@@ -123,6 +124,8 @@ export function ExportDialog() {
 		refetchMeta,
 	} = useEditorContext();
 
+	const projectPath = editorInstance.path;
+
 	const auth = authStore.createQuery();
 	const organisations = createOrganizationsQuery();
 
@@ -135,6 +138,11 @@ export function ExportDialog() {
 			backgroundSource.alpha < 255
 		);
 	};
+
+	const isCancellationError = (error: unknown) =>
+		error instanceof SilentError ||
+		error === "Export cancelled" ||
+		(error instanceof Error && error.message === "Export cancelled");
 
 	const [_settings, setSettings] = makePersisted(
 		createStore<Settings>({
@@ -168,8 +176,12 @@ export function ExportDialog() {
 		return ret;
 	});
 
-	const exportWithSettings = (onProgress: (progress: FramesRendered) => void) =>
-		exportVideo(
+	let cancelCurrentExport: (() => void) | null = null;
+
+	const exportWithSettings = (
+		onProgress: (progress: FramesRendered) => void,
+	) => {
+		const { promise, cancel } = createExportTask(
 			projectPath,
 			settings.format === "Mp4"
 				? {
@@ -192,26 +204,68 @@ export function ExportDialog() {
 					},
 			onProgress,
 		);
+		cancelCurrentExport = cancel;
+		return promise.finally(() => {
+			if (cancelCurrentExport === cancel) cancelCurrentExport = null;
+		});
+	};
 
 	const [outputPath, setOutputPath] = createSignal<string | null>(null);
+	const [isCancelled, setIsCancelled] = createSignal(false);
 
-	const projectPath = editorInstance.path;
+	const handleCancel = async () => {
+		if (
+			await ask("Are you sure you want to cancel the export?", {
+				title: "Cancel Export",
+				kind: "warning",
+			})
+		) {
+			setIsCancelled(true);
+			cancelCurrentExport?.();
+			cancelCurrentExport = null;
+			setExportState({ type: "idle" });
+			const path = outputPath();
+			if (path) {
+				try {
+					await remove(path);
+				} catch (e) {
+					console.error("Failed to delete cancelled file", e);
+				}
+			}
+		}
+	};
 
 	const exportEstimates = createQuery(() => ({
-		// prevents flicker when modifying settings
 		placeholderData: keepPreviousData,
 		queryKey: [
 			"exportEstimates",
 			{
+				format: settings.format,
 				resolution: {
 					x: settings.resolution.width,
 					y: settings.resolution.height,
 				},
 				fps: settings.fps,
+				compression: settings.compression,
 			},
 		] as const,
-		queryFn: ({ queryKey: [_, { resolution, fps }] }) =>
-			commands.getExportEstimates(projectPath, resolution, fps),
+		queryFn: ({ queryKey: [_, { format, resolution, fps, compression }] }) => {
+			const exportSettings =
+				format === "Mp4"
+					? {
+							format: "Mp4" as const,
+							fps,
+							resolution_base: resolution,
+							compression,
+						}
+					: {
+							format: "Gif" as const,
+							fps,
+							resolution_base: resolution,
+							quality: null,
+						};
+			return commands.getExportEstimates(projectPath, exportSettings);
+		},
 	}));
 
 	const exportButtonIcon: Record<"file" | "clipboard" | "link", JSX.Element> = {
@@ -222,18 +276,26 @@ export function ExportDialog() {
 
 	const copy = createMutation(() => ({
 		mutationFn: async () => {
+			setIsCancelled(false);
 			if (exportState.type !== "idle") return;
 			setExportState(reconcile({ action: "copy", type: "starting" }));
 
 			const outputPath = await exportWithSettings((progress) => {
+				if (isCancelled()) throw new SilentError("Cancelled");
 				setExportState({ type: "rendering", progress });
 			});
+
+			if (isCancelled()) throw new SilentError("Cancelled");
 
 			setExportState({ type: "copying" });
 
 			await commands.copyVideoToClipboard(outputPath);
 		},
 		onError: (error) => {
+			if (isCancelled() || isCancellationError(error)) {
+				setExportState(reconcile({ type: "idle" }));
+				return;
+			}
 			commands.globalMessageDialog(
 				error instanceof Error ? error.message : "Failed to copy recording",
 			);
@@ -265,6 +327,7 @@ export function ExportDialog() {
 
 	const save = createMutation(() => ({
 		mutationFn: async () => {
+			setIsCancelled(false);
 			if (exportState.type !== "idle") return;
 
 			const extension = settings.format === "Gif" ? "gif" : "mp4";
@@ -293,8 +356,11 @@ export function ExportDialog() {
 			});
 
 			const videoPath = await exportWithSettings((progress) => {
+				if (isCancelled()) throw new SilentError("Cancelled");
 				setExportState({ type: "rendering", progress });
 			});
+
+			if (isCancelled()) throw new SilentError("Cancelled");
 
 			setExportState({ type: "copying" });
 
@@ -303,6 +369,10 @@ export function ExportDialog() {
 			setExportState({ type: "done" });
 		},
 		onError: (error) => {
+			if (isCancelled() || isCancellationError(error)) {
+				setExportState({ type: "idle" });
+				return;
+			}
 			commands.globalMessageDialog(
 				error instanceof Error
 					? error.message
@@ -332,6 +402,7 @@ export function ExportDialog() {
 
 	const upload = createMutation(() => ({
 		mutationFn: async () => {
+			setIsCancelled(false);
 			if (exportState.type !== "idle") return;
 			setExportState(reconcile({ action: "upload", type: "starting" }));
 
@@ -371,9 +442,12 @@ export function ExportDialog() {
 				);
 			});
 
-			await exportWithSettings((progress) =>
-				setExportState({ type: "rendering", progress }),
-			);
+			await exportWithSettings((progress) => {
+				if (isCancelled()) throw new SilentError("Cancelled");
+				setExportState({ type: "rendering", progress });
+			});
+
+			if (isCancelled()) throw new SilentError("Cancelled");
 
 			setExportState({ type: "uploading", progress: 0 });
 
@@ -412,6 +486,10 @@ export function ExportDialog() {
 			setExportState({ type: "done" });
 		},
 		onError: (error) => {
+			if (isCancelled() || isCancellationError(error)) {
+				setExportState(reconcile({ type: "idle" }));
+				return;
+			}
 			console.error(error);
 			if (!(error instanceof SilentError)) {
 				commands.globalMessageDialog(
@@ -675,7 +753,7 @@ export function ExportDialog() {
 							</div>
 						</div>
 						{/* Frame rate */}
-						<div class="overflow-hidden relative p-4 rounded-xl dark:bg-gray-2 bg-gray-3">
+						<div class="p-4 rounded-xl dark:bg-gray-2 bg-gray-3">
 							<div class="flex flex-col gap-3">
 								<h3 class="text-gray-12">Frame rate</h3>
 								<KSelect<{ label: string; value: number }>
@@ -690,13 +768,13 @@ export function ExportDialog() {
 										: FPS_OPTIONS
 									).find((opt) => opt.value === settings.fps)}
 									onChange={(option) => {
-										const value =
-											option?.value ?? (settings.format === "Gif" ? 10 : 30);
+										if (!option) return;
 										trackEvent("export_fps_changed", {
-											fps: value,
+											fps: option.value,
 										});
-										setSettings("fps", value);
+										setSettings("fps", option.value);
 									}}
+									disallowEmptySelection
 									itemComponent={(props) => (
 										<MenuItem<typeof KSelect.Item>
 											as={KSelect.Item}
@@ -853,10 +931,20 @@ export function ExportDialog() {
 														keyed
 													>
 														{(copyState) => (
-															<RenderProgress
-																state={copyState}
-																format={settings.format}
-															/>
+															<>
+																<RenderProgress
+																	state={copyState}
+																	format={settings.format}
+																/>
+																<Button
+																	variant="ghost"
+																	size="sm"
+																	onClick={handleCancel}
+																	class="mt-4 hover:bg-red-500 hover:text-white"
+																>
+																	Cancel
+																</Button>
+															</>
 														)}
 													</Show>
 												</div>
@@ -895,10 +983,20 @@ export function ExportDialog() {
 																	keyed
 																>
 																	{(copyState) => (
-																		<RenderProgress
-																			state={copyState}
-																			format={settings.format}
-																		/>
+																		<>
+																			<RenderProgress
+																				state={copyState}
+																				format={settings.format}
+																			/>
+																			<Button
+																				variant="ghost"
+																				size="sm"
+																				onClick={handleCancel}
+																				class="mt-4 hover:bg-red-500 hover:text-white"
+																			>
+																				Cancel
+																			</Button>
+																		</>
 																	)}
 																</Show>
 															</>
@@ -967,10 +1065,20 @@ export function ExportDialog() {
 																		keyed
 																	>
 																		{(renderState) => (
-																			<RenderProgress
-																				state={renderState}
-																				format={settings.format}
-																			/>
+																			<>
+																				<RenderProgress
+																					state={renderState}
+																					format={settings.format}
+																				/>
+																				<Button
+																					variant="ghost"
+																					size="sm"
+																					onClick={handleCancel}
+																					class="mt-4 hover:bg-red-500 hover:text-white"
+																				>
+																					Cancel
+																				</Button>
+																			</>
 																		)}
 																	</Match>
 																</Switch>
@@ -995,90 +1103,101 @@ export function ExportDialog() {
 									</Switch>
 								</div>
 							</Dialog.Content>
-							<Dialog.Footer>
-								<Show
-									when={
-										exportState.action === "upload" &&
-										exportState.type === "done"
-									}
-								>
-									<div class="relative">
-										<a
-											href={meta().sharing?.link}
-											target="_blank"
-											rel="noreferrer"
-											class="block"
-										>
-											<Button
-												onClick={() => {
-													setCopyPressed(true);
-													setTimeout(() => {
-														setCopyPressed(false);
-													}, 2000);
-													navigator.clipboard.writeText(meta().sharing?.link!);
-												}}
-												variant="dark"
-												class="flex gap-2 justify-center items-center"
+							<Show
+								when={
+									exportState.type === "done" &&
+									(exportState.action === "save" ||
+										exportState.action === "upload")
+								}
+							>
+								<Dialog.Footer>
+									<Show
+										when={
+											exportState.action === "upload" &&
+											exportState.type === "done"
+										}
+									>
+										<div class="relative">
+											<a
+												href={meta().sharing?.link}
+												target="_blank"
+												rel="noreferrer"
+												class="block"
 											>
-												{!copyPressed() ? (
-													<IconCapCopy class="transition-colors duration-200 text-gray-1 size-4 group-hover:text-gray-12" />
-												) : (
-													<IconLucideCheck class="transition-colors duration-200 text-gray-1 size-4 svgpathanimation group-hover:text-gray-12" />
-												)}
-												<p>Open Link</p>
-											</Button>
-										</a>
-									</div>
-								</Show>
+												<Button
+													onClick={() => {
+														setCopyPressed(true);
+														setTimeout(() => {
+															setCopyPressed(false);
+														}, 2000);
+														navigator.clipboard.writeText(
+															meta().sharing?.link!,
+														);
+													}}
+													variant="dark"
+													class="flex gap-2 justify-center items-center"
+												>
+													{!copyPressed() ? (
+														<IconCapCopy class="transition-colors duration-200 text-gray-1 size-4 group-hover:text-gray-12" />
+													) : (
+														<IconLucideCheck class="transition-colors duration-200 text-gray-1 size-4 svgpathanimation group-hover:text-gray-12" />
+													)}
+													<p>Open Link</p>
+												</Button>
+											</a>
+										</div>
+									</Show>
 
-								<Show
-									when={
-										exportState.action === "save" && exportState.type === "done"
-									}
-								>
-									<div class="flex gap-4 w-full">
-										<Button
-											variant="dark"
-											class="flex gap-2 items-center"
-											onClick={() => {
-												const path = outputPath();
-												if (path) {
-													commands.openFilePath(path);
-												}
-											}}
-										>
-											<IconCapFile class="size-4" />
-											Open File
-										</Button>
-										<Button
-											variant="dark"
-											class="flex gap-2 items-center"
-											onClick={async () => {
-												const path = outputPath();
-												if (path) {
-													setClipboardCopyPressed(true);
-													setTimeout(() => {
-														setClipboardCopyPressed(false);
-													}, 2000);
-													await commands.copyVideoToClipboard(path);
-													toast.success(
-														`${
-															settings.format === "Gif" ? "GIF" : "Video"
-														} copied to clipboard`,
-													);
-												}
-											}}
-										>
-											{!clipboardCopyPressed() ? (
-												<IconCapCopy class="size-4" />
-											) : (
-												<IconLucideCheck class="size-4 svgpathanimation" />
-											)}
-											Copy to Clipboard
-										</Button>
-									</div>
-								</Show>
-							</Dialog.Footer>
+									<Show
+										when={
+											exportState.action === "save" &&
+											exportState.type === "done"
+										}
+									>
+										<div class="flex gap-4 w-full">
+											<Button
+												variant="dark"
+												class="flex gap-2 items-center"
+												onClick={() => {
+													const path = outputPath();
+													if (path) {
+														commands.openFilePath(path);
+													}
+												}}
+											>
+												<IconCapFile class="size-4" />
+												Open File
+											</Button>
+											<Button
+												variant="dark"
+												class="flex gap-2 items-center"
+												onClick={async () => {
+													const path = outputPath();
+													if (path) {
+														setClipboardCopyPressed(true);
+														setTimeout(() => {
+															setClipboardCopyPressed(false);
+														}, 2000);
+														await commands.copyVideoToClipboard(path);
+														toast.success(
+															`${
+																settings.format === "Gif" ? "GIF" : "Video"
+															} copied to clipboard`,
+														);
+													}
+												}}
+											>
+												{!clipboardCopyPressed() ? (
+													<IconCapCopy class="size-4" />
+												) : (
+													<IconLucideCheck class="size-4 svgpathanimation" />
+												)}
+												Copy to Clipboard
+											</Button>
+										</div>
+									</Show>
+								</Dialog.Footer>
+							</Show>
 						</>
 					);
 				}}
