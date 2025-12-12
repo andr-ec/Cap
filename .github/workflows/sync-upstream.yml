@@ -58,7 +58,7 @@ jobs:
             echo "Release already exists for $LATEST_TAG - skipping build"
           else
             echo "No release for $LATEST_TAG - triggering build workflow"
-            gh workflow run auto-build-release.yml --ref main -f tag="$LATEST_TAG"
+            gh workflow run auto-build-release.yml --repo ${{ github.repository }} --ref main -f tag="$LATEST_TAG"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.WORKFLOW_TOKEN }}
