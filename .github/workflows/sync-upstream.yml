@@ -42,7 +42,7 @@ jobs:
           git push origin --tags --force
           echo "Tags synced successfully!"
 
-      - name: Check for new releases to build
+      - name: Trigger build for new releases
         run: |
           # Get latest upstream tag
           LATEST_TAG=$(git tag -l "cap-v*" --sort=-version:refname | head -n1)
@@ -55,9 +55,10 @@ jobs:
 
           # Check if release already exists
           if gh release view "$LATEST_TAG" >/dev/null 2>&1; then
-            echo "Release already exists for $LATEST_TAG"
+            echo "Release already exists for $LATEST_TAG - skipping build"
           else
-            echo "No release for $LATEST_TAG - build will be triggered by tag push"
+            echo "No release for $LATEST_TAG - triggering build workflow"
+            gh workflow run auto-build-release.yml --ref main -f tag="$LATEST_TAG"
           fi
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.WORKFLOW_TOKEN }}
