@@ -75,6 +75,12 @@ jobs:
           git fetch upstream --tags
           git checkout ${{ needs.get-version.outputs.tag }}
         shell: bash
+
+      - name: Copy opensource config from fork
+        run: |
+          git fetch origin main
+          git checkout origin/main -- apps/desktop/src-tauri/tauri.opensource.conf.json
+        shell: bash
           
       - name: Rust setup
         uses: dtolnay/rust-toolchain@stable
