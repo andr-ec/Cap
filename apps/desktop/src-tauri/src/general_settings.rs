@@ -72,12 +72,11 @@ pub struct GeneralSettingsStore {
     pub hide_dock_icon: bool,
     #[serde(default)]
     pub auto_create_shareable_link: bool,
-    #[serde(default = "true_b")]
+    #[serde(default = "default_true")]
     pub enable_notifications: bool,
     #[serde(default)]
     pub disable_auto_open_links: bool,
-    // first launch: store won't exist so show startup
-    #[serde(default = "true_b")]
+    #[serde(default = "default_true")]
     pub has_completed_startup: bool,
     #[serde(default)]
     pub theme: AppTheme,
@@ -134,7 +133,7 @@ fn default_enable_native_camera_preview() -> bool {
 }
 
 fn default_enable_new_recording_flow() -> bool {
-    true
+    false
 }
 
 fn no(_: &bool) -> bool {
@@ -192,7 +191,7 @@ impl Default for GeneralSettingsStore {
             delete_instant_recordings_after_upload: false,
             instant_mode_max_resolution: 1920,
             default_project_name_template: None,
-            crash_recovery_recording: false,
+            crash_recovery_recording: true,
         }
     }
 }
@@ -204,10 +203,6 @@ pub enum AppTheme {
     System,
     Light,
     Dark,
-}
-
-fn true_b() -> bool {
-    true
 }
 
 impl GeneralSettingsStore {
@@ -259,7 +254,7 @@ pub fn init(app: &AppHandle) {
     };
 
     if !store.recording_picker_preference_set {
-        store.enable_new_recording_flow = true;
+        store.enable_new_recording_flow = false;
         store.recording_picker_preference_set = true;
     }
 

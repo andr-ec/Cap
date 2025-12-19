@@ -15,6 +15,7 @@ import {
 	serializeProjectConfiguration,
 	useEditorContext,
 } from "./context";
+import { preloadCropVideoFull } from "./cropVideoPreloader";
 import { MaskOverlay } from "./MaskOverlay";
 import { TextOverlay } from "./TextOverlay";
 import {
@@ -80,7 +81,6 @@ export function PlayerContent() {
 							backgroundColor: captionsStore.state.settings.backgroundColor,
 							backgroundOpacity: captionsStore.state.settings.backgroundOpacity,
 							position: captionsStore.state.settings.position,
-							bold: captionsStore.state.settings.bold,
 							italic: captionsStore.state.settings.italic,
 							outline: captionsStore.state.settings.outline,
 							outlineColor: captionsStore.state.settings.outlineColor,
@@ -257,6 +257,8 @@ export function PlayerContent() {
 					<EditorButton
 						tooltipText="Crop Video"
 						onClick={cropDialogHandler}
+						onMouseEnter={preloadCropVideoFull}
+						onFocus={preloadCropVideoFull}
 						leftIcon={<IconCapCrop class="w-5 text-gray-12" />}
 					>
 						Crop

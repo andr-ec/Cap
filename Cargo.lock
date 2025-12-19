@@ -1122,6 +1122,7 @@ version = "0.1.0"
 dependencies = [
  "cap-mediafoundation-utils",
  "inquire",
+ "parking_lot",
  "thiserror 1.0.69",
  "tracing",
  "windows 0.60.0",
@@ -1327,6 +1328,7 @@ dependencies = [
 name = "cap-enc-ffmpeg"
 version = "0.1.0"
 dependencies = [
+ "cap-frame-converter",
  "cap-media-info",
  "ffmpeg-next",
  "serde",
@@ -1358,6 +1360,7 @@ dependencies = [
  "scap-direct3d",
  "scap-targets",
  "thiserror 1.0.69",
+ "tracing",
  "windows 0.60.0",
  "windows-core 0.60.1",
  "windows-numerics 0.2.0",
@@ -1594,6 +1597,7 @@ dependencies = [
  "metal 0.31.0",
  "objc2 0.6.2",
  "pretty_assertions",
+ "rayon",
  "reactive_graph",
  "resvg",
  "serde",
@@ -1663,6 +1667,7 @@ dependencies = [
  "cidre",
  "ffmpeg-hw-device",
  "ffmpeg-next",
+ "num_cpus",
  "tokio",
  "tracing",
  "windows 0.60.0",
@@ -7722,6 +7727,7 @@ dependencies = [
  "scap-ffmpeg",
  "scap-targets",
  "thiserror 1.0.69",
+ "tracing",
  "windows 0.60.0",
  "windows-numerics 0.2.0",
  "workspace-hack",
