@@ -52,3 +52,4 @@ tauri.windows.conf.json
 .env*.local
 github-secrets.env
 .docs/
+.claude/
