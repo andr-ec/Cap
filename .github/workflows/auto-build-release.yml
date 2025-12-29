@@ -72,7 +72,7 @@ jobs:
       - name: Fetch upstream tags and checkout
         run: |
           git remote add upstream https://github.com/CapSoftware/Cap.git || true
-          git fetch upstream --tags
+          git fetch upstream --tags --force
           git checkout ${{ needs.get-version.outputs.tag }}
         shell: bash
 
@@ -231,9 +231,9 @@ jobs:
       - name: Fetch upstream tags and checkout
         run: |
           git remote add upstream https://github.com/CapSoftware/Cap.git || true
-          git fetch upstream --tags
+          git fetch upstream --tags --force
           git checkout ${{ needs.get-version.outputs.tag }}
-          
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
