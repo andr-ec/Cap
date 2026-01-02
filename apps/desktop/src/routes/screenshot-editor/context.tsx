@@ -1,6 +1,6 @@
 import { createContextProvider } from "@solid-primitives/context";
 import { trackStore } from "@solid-primitives/deep";
-import { debounce } from "@solid-primitives/scheduled";
+import { debounce, throttle } from "@solid-primitives/scheduled";
 import { makePersisted } from "@solid-primitives/storage";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
@@ -134,6 +134,10 @@ function createScreenshotEditorContext() {
 	});
 
 	const [latestFrame, setLatestFrame] = createLazySignal<FrameData>();
+	const [originalImageSize, setOriginalImageSize] = createSignal<{
+		width: number;
+		height: number;
+	} | null>(null);
 	const [isRenderReady, setIsRenderReady] = createSignal(false);
 	let wsRef: WebSocket | null = null;
 
@@ -147,43 +151,71 @@ function createScreenshotEditorContext() {
 			}
 		}
 
-		let hasReceivedWebSocketFrame = false;
+		const hasReceivedWebSocketFrame = { value: false };
 
 		if (instance.path) {
-			const img = new Image();
-			img.crossOrigin = "anonymous";
-			img.src = convertFileSrc(instance.path);
-			img.onload = async () => {
-				if (hasReceivedWebSocketFrame) {
-					return;
-				}
-				try {
-					const bitmap = await createImageBitmap(img);
-					if (hasReceivedWebSocketFrame) {
-						bitmap.close();
-						return;
-					}
-					const existing = latestFrame();
-					if (existing?.bitmap) {
-						existing.bitmap.close();
-					}
-					setLatestFrame({
+			const loadImage = (imagePath: string) => {
+				const img = new Image();
+				img.crossOrigin = "anonymous";
+				img.src = convertFileSrc(imagePath);
+				img.onload = async () => {
+					setOriginalImageSize({
 						width: img.naturalWidth,
 						height: img.naturalHeight,
-						bitmap,
 					});
-					setIsRenderReady(true);
-				} catch (e: unknown) {
-					console.error("Failed to create ImageBitmap from fallback image:", e);
-				}
+					if (hasReceivedWebSocketFrame.value) {
+						return;
+					}
+					try {
+						const bitmap = await createImageBitmap(img);
+						if (hasReceivedWebSocketFrame.value) {
+							bitmap.close();
+							return;
+						}
+						const existing = latestFrame();
+						if (existing?.bitmap) {
+							existing.bitmap.close();
+						}
+						setLatestFrame({
+							width: img.naturalWidth,
+							height: img.naturalHeight,
+							bitmap,
+						});
+						setIsRenderReady(true);
+					} catch (e: unknown) {
+						console.error(
+							"Failed to create ImageBitmap from fallback image:",
+							e,
+						);
+					}
+				};
+				return img;
 			};
-			img.onerror = (event) => {
-				console.error("Failed to load screenshot image:", {
-					path: instance.path,
-					src: img.src,
-					event,
-				});
-			};
+
+			const pathStr = instance.path;
+			const isCapDir = pathStr.endsWith(".cap");
+
+			if (isCapDir) {
+				const originalPath = `${pathStr}/original.png`;
+				const img = loadImage(originalPath);
+				img.onerror = () => {
+					const fallbackImg = loadImage(pathStr);
+					fallbackImg.onerror = (event) => {
+						console.error("Failed to load screenshot image:", {
+							path: instance.path,
+							event,
+						});
+					};
+				};
+			} else {
+				const img = loadImage(pathStr);
+				img.onerror = (event) => {
+					console.error("Failed to load screenshot image:", {
+						path: instance.path,
+						event,
+					});
+				};
+			}
 		}
 
 		const ws = new WebSocket(instance.framesSocketUrl);
@@ -201,7 +233,7 @@ function createScreenshotEditorContext() {
 
 			if (!width || !height) return;
 
-			hasReceivedWebSocketFrame = true;
+			hasReceivedWebSocketFrame.value = true;
 			setIsRenderReady(true);
 
 			const expectedRowBytes = width * 4;
@@ -261,6 +293,16 @@ function createScreenshotEditorContext() {
 		}
 	});
 
+	const FPS = 60;
+	const FRAME_TIME = 1000 / FPS;
+
+	const doRenderUpdate = (config: ProjectConfiguration) => {
+		commands.updateScreenshotConfig(config, false);
+	};
+
+	const throttledRenderUpdate = throttle(doRenderUpdate, FRAME_TIME);
+	const trailingRenderUpdate = debounce(doRenderUpdate, FRAME_TIME + 16);
+
 	const saveConfig = debounce((config: ProjectConfiguration) => {
 		commands.updateScreenshotConfig(config, true);
 	}, 1000);
@@ -280,7 +322,8 @@ function createScreenshotEditorContext() {
 					annotations: unwrap(annotations),
 				};
 
-				commands.updateScreenshotConfig(config, false);
+				throttledRenderUpdate(config);
+				trailingRenderUpdate(config);
 				saveConfig(config);
 			},
 		),
@@ -423,6 +466,7 @@ function createScreenshotEditorContext() {
 		dialog,
 		setDialog,
 		latestFrame,
+		originalImageSize,
 		isRenderReady,
 		editorInstance,
 	};
