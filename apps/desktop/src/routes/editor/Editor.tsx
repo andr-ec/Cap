@@ -121,12 +121,16 @@ function Inner() {
 		setEditorState,
 		previewResolutionBase,
 		dialog,
-		canvasControls,
 	} = useEditorContext();
 
 	const isExportMode = () => {
 		const d = dialog();
 		return "type" in d && d.type === "export" && d.open;
+	};
+
+	const isCropMode = () => {
+		const d = dialog();
+		return "type" in d && d.type === "crop" && d.open;
 	};
 
 	const [layoutRef, setLayoutRef] = createSignal<HTMLDivElement>();
@@ -226,6 +230,14 @@ function Inner() {
 	createEffect(
 		on(isExportMode, (exportMode, prevExportMode) => {
 			if (prevExportMode === true && exportMode === false) {
+				emitRenderFrame(frameNumberToRender());
+			}
+		}),
+	);
+
+	createEffect(
+		on(isCropMode, (cropMode, prevCropMode) => {
+			if (prevCropMode === true && cropMode === false) {
 				emitRenderFrame(frameNumberToRender());
 			}
 		}),
@@ -493,17 +505,18 @@ function Dialogs() {
 									string | null
 								>(null);
 
-								const playerCanvas = document.getElementById(
-									"canvas",
-								) as HTMLCanvasElement | null;
-								if (playerCanvas) {
-									playerCanvas.toBlob((blob) => {
-										if (blob) {
-											const url = URL.createObjectURL(blob);
-											setFrameBlobUrl(url);
-										}
-									}, "image/png");
-								}
+								commands
+									.getDisplayFrameForCropping(FPS)
+									.then((pngBytes) => {
+										const blob = new Blob([new Uint8Array(pngBytes)], {
+											type: "image/png",
+										});
+										const url = URL.createObjectURL(blob);
+										setFrameBlobUrl(url);
+									})
+									.catch((error: unknown) => {
+										console.warn("Display frame fetch failed:", error);
+									});
 
 								onCleanup(() => {
 									const url = frameBlobUrl();
