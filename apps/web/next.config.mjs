@@ -4,6 +4,9 @@ import("dotenv").then(({ config }) => config({ path: "../../.env" }));
 
 import fs from "node:fs";
 import path from "node:path";
+import workflowNext from "workflow/next";
+
+const { withWorkflow } = workflowNext;
 
 const packageJson = JSON.parse(
 	fs.readFileSync(path.resolve("./package.json"), "utf8"),
@@ -12,6 +15,12 @@ const { version } = packageJson;
 
 const nextConfig = {
 	reactStrictMode: true,
+	serverExternalPackages: [
+		"@ffmpeg-installer/ffmpeg",
+		"@ffprobe-installer/ffprobe",
+		"fluent-ffmpeg",
+		"prettier",
+	],
 	transpilePackages: [
 		"@cap/ui",
 		"@cap/utils",
@@ -133,4 +142,4 @@ const nextConfig = {
 	// },
 };
 
-export default nextConfig;
+export default withWorkflow(nextConfig);
