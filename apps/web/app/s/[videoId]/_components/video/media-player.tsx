@@ -2235,6 +2235,8 @@ interface MediaPlayerVolumeProps
 	asChild?: boolean;
 	expandable?: boolean;
 	enhancedAudioEnabled?: boolean;
+	enhancedAudioMuted?: boolean;
+	setEnhancedAudioMuted?: (muted: boolean) => void;
 }
 
 function MediaPlayerVolume(props: MediaPlayerVolumeProps) {
@@ -2242,6 +2244,8 @@ function MediaPlayerVolume(props: MediaPlayerVolumeProps) {
 		asChild,
 		expandable = false,
 		enhancedAudioEnabled = false,
+		enhancedAudioMuted,
+		setEnhancedAudioMuted,
 		className,
 		disabled,
 		...volumeProps
@@ -2261,15 +2265,36 @@ function MediaPlayerVolume(props: MediaPlayerVolumeProps) {
 
 	const isDisabled = disabled || context.disabled;
 
-	const displayMuted = enhancedAudioEnabled ? false : mediaMuted;
+	const displayMuted = enhancedAudioEnabled
+		? (enhancedAudioMuted ?? false)
+		: mediaMuted;
+
+	const resolvedVolumeLevel = enhancedAudioEnabled
+		? displayMuted || mediaVolume === 0
+			? "off"
+			: mediaVolume >= 0.5
+				? "high"
+				: "low"
+		: mediaVolumeLevel;
 
 	const onMute = React.useCallback(() => {
+		if (enhancedAudioEnabled && setEnhancedAudioMuted) {
+			setEnhancedAudioMuted(!(enhancedAudioMuted ?? false));
+			return;
+		}
+
 		dispatch({
 			type: mediaMuted
 				? MediaActionTypes.MEDIA_UNMUTE_REQUEST
 				: MediaActionTypes.MEDIA_MUTE_REQUEST,
 		});
-	}, [dispatch, mediaMuted]);
+	}, [
+		dispatch,
+		enhancedAudioEnabled,
+		enhancedAudioMuted,
+		mediaMuted,
+		setEnhancedAudioMuted,
+	]);
 
 	const onVolumeChange = React.useCallback(
 		(value: number[]) => {
@@ -2332,9 +2357,9 @@ function MediaPlayerVolume(props: MediaPlayerVolumeProps) {
 					disabled={isDisabled}
 					onClick={onMute}
 				>
-					{mediaVolumeLevel === "off" || displayMuted ? (
+					{resolvedVolumeLevel === "off" ? (
 						<VolumeXIcon />
-					) : mediaVolumeLevel === "high" ? (
+					) : resolvedVolumeLevel === "high" ? (
 						<Volume2Icon />
 					) : (
 						<Volume1Icon />
@@ -2878,30 +2903,27 @@ interface EnhancedAudioSyncProps {
 	enhancedAudioRef: React.RefObject<HTMLAudioElement | null>;
 	videoRef: React.RefObject<HTMLVideoElement | null>;
 	enhancedAudioEnabled: boolean;
+	enhancedAudioMuted: boolean;
+	setEnhancedAudioMuted: (muted: boolean) => void;
 }
 
 function EnhancedAudioSync({
 	enhancedAudioRef,
 	videoRef,
 	enhancedAudioEnabled,
+	enhancedAudioMuted,
+	setEnhancedAudioMuted,
 }: EnhancedAudioSyncProps) {
 	const mediaVolume = useMediaSelector((state) => state.mediaVolume ?? 1);
-	const hasUserInteractedRef = React.useRef(false);
-	const [effectiveVolume, setEffectiveVolume] = React.useState(1);
-
-	React.useEffect(() => {
-		if (mediaVolume > 0) {
-			hasUserInteractedRef.current = true;
-			setEffectiveVolume(mediaVolume);
-		} else if (hasUserInteractedRef.current) {
-			setEffectiveVolume(mediaVolume);
-		}
-	}, [mediaVolume]);
+	const mediaMuted = useMediaSelector((state) => state.mediaMuted ?? false);
+	const wasEnhancedRef = React.useRef(false);
 
 	const syncEnhancedAudio = React.useCallback(() => {
-		if (!enhancedAudioRef.current || !videoRef.current) return;
-		enhancedAudioRef.current.currentTime = videoRef.current.currentTime;
-		enhancedAudioRef.current.playbackRate = videoRef.current.playbackRate;
+		const video = videoRef.current;
+		const audio = enhancedAudioRef.current;
+		if (!video || !audio) return;
+		audio.currentTime = video.currentTime;
+		audio.playbackRate = video.playbackRate;
 	}, [enhancedAudioRef, videoRef]);
 
 	React.useEffect(() => {
@@ -2910,10 +2932,13 @@ function EnhancedAudioSync({
 		if (!video || !audio) return;
 
 		const handlePlay = () => {
-			if (enhancedAudioEnabled) {
-				syncEnhancedAudio();
-				audio.play().catch(() => {});
+			if (!enhancedAudioEnabled) return;
+			syncEnhancedAudio();
+			if (audio.muted) {
+				audio.pause();
+				return;
 			}
+			audio.play().catch(() => {});
 		};
 
 		const handlePause = () => {
@@ -2950,20 +2975,46 @@ function EnhancedAudioSync({
 		const audio = enhancedAudioRef.current;
 		if (!video || !audio) return;
 
+		const wasEnhanced = wasEnhancedRef.current;
+
 		if (enhancedAudioEnabled) {
-			video.muted = true;
-			audio.volume = effectiveVolume;
-			syncEnhancedAudio();
-			if (!video.paused) {
-				audio.play().catch(() => {});
+			const muteForEnhanced = wasEnhanced ? enhancedAudioMuted : mediaMuted;
+
+			if (!wasEnhanced && enhancedAudioMuted !== mediaMuted) {
+				setEnhancedAudioMuted(mediaMuted);
 			}
-		} else {
-			video.muted = false;
-			audio.pause();
+
+			wasEnhancedRef.current = true;
+
+			video.muted = true;
+			audio.volume = mediaVolume;
+			audio.muted = muteForEnhanced;
+			syncEnhancedAudio();
+
+			if (!video.paused) {
+				if (muteForEnhanced) {
+					audio.pause();
+				} else {
+					audio.play().catch(() => {});
+				}
+			}
+
+			return;
+		}
+
+		wasEnhancedRef.current = false;
+
+		audio.pause();
+
+		if (wasEnhanced) {
+			video.muted = enhancedAudioMuted;
 		}
 	}, [
 		enhancedAudioEnabled,
-		effectiveVolume,
+		enhancedAudioMuted,
+		mediaMuted,
+		mediaVolume,
+		setEnhancedAudioMuted,
 		syncEnhancedAudio,
 		videoRef,
 		enhancedAudioRef,
