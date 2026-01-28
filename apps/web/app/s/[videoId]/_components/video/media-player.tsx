@@ -31,6 +31,7 @@ import {
 	RewindIcon,
 	RotateCcwIcon,
 	SettingsIcon,
+	SparklesIcon,
 	SubtitlesIcon,
 	Volume1Icon,
 	Volume2Icon,
@@ -2233,12 +2234,14 @@ interface MediaPlayerVolumeProps
 	extends React.ComponentProps<typeof SliderPrimitive.Root> {
 	asChild?: boolean;
 	expandable?: boolean;
+	enhancedAudioEnabled?: boolean;
 }
 
 function MediaPlayerVolume(props: MediaPlayerVolumeProps) {
 	const {
 		asChild,
 		expandable = false,
+		enhancedAudioEnabled = false,
 		className,
 		disabled,
 		...volumeProps
@@ -2257,6 +2260,8 @@ function MediaPlayerVolume(props: MediaPlayerVolumeProps) {
 	const volumeTriggerId = React.useId();
 
 	const isDisabled = disabled || context.disabled;
+
+	const displayMuted = enhancedAudioEnabled ? false : mediaMuted;
 
 	const onMute = React.useCallback(() => {
 		dispatch({
@@ -2298,7 +2303,7 @@ function MediaPlayerVolume(props: MediaPlayerVolumeProps) {
 		[dispatch, store],
 	);
 
-	const effectiveVolume = mediaMuted ? 0 : mediaVolume;
+	const effectiveVolume = displayMuted ? 0 : mediaVolume;
 
 	return (
 		<div
@@ -2317,17 +2322,17 @@ function MediaPlayerVolume(props: MediaPlayerVolumeProps) {
 					id={volumeTriggerId}
 					type="button"
 					aria-controls={`${context.mediaId} ${sliderId}`}
-					aria-label={mediaMuted ? "Unmute" : "Mute"}
-					aria-pressed={mediaMuted}
+					aria-label={displayMuted ? "Unmute" : "Mute"}
+					aria-pressed={displayMuted}
 					data-slot="media-player-volume-trigger"
-					data-state={mediaMuted ? "on" : "off"}
+					data-state={displayMuted ? "on" : "off"}
 					variant="ghost"
 					size="icon"
 					className="size-8"
 					disabled={isDisabled}
 					onClick={onMute}
 				>
-					{mediaVolumeLevel === "off" || mediaMuted ? (
+					{mediaVolumeLevel === "off" || displayMuted ? (
 						<VolumeXIcon />
 					) : mediaVolumeLevel === "high" ? (
 						<Volume2Icon />
@@ -2785,6 +2790,177 @@ function MediaPlayerCaptions(props: MediaPlayerCaptionsProps) {
 	);
 }
 
+type EnhancedAudioStatus = "PROCESSING" | "COMPLETE" | "ERROR" | "SKIPPED";
+
+interface MediaPlayerEnhancedAudioProps
+	extends React.ComponentProps<typeof Button> {
+	enhancedAudioStatus?: EnhancedAudioStatus | null;
+	enhancedAudioEnabled?: boolean;
+	setEnhancedAudioEnabled?: (enabled: boolean) => void;
+}
+
+function MediaPlayerEnhancedAudio(props: MediaPlayerEnhancedAudioProps) {
+	const {
+		children,
+		className,
+		disabled,
+		enhancedAudioStatus,
+		enhancedAudioEnabled,
+		setEnhancedAudioEnabled,
+		...enhancedAudioProps
+	} = props;
+
+	const context = useMediaPlayerContext("MediaPlayerEnhancedAudio");
+
+	const isProcessing = enhancedAudioStatus === "PROCESSING";
+	const isComplete = enhancedAudioStatus === "COMPLETE";
+	const isDisabled = disabled || context.disabled || !isComplete;
+
+	const onEnhancedAudioToggle = React.useCallback(() => {
+		if (isComplete) {
+			setEnhancedAudioEnabled?.(!enhancedAudioEnabled);
+		}
+	}, [enhancedAudioEnabled, setEnhancedAudioEnabled, isComplete]);
+
+	if (
+		!enhancedAudioStatus ||
+		enhancedAudioStatus === "ERROR" ||
+		enhancedAudioStatus === "SKIPPED"
+	) {
+		return null;
+	}
+
+	const tooltipText = isProcessing
+		? "Enhancing audio..."
+		: enhancedAudioEnabled
+			? "Enhanced audio on"
+			: "Enhance audio";
+
+	return (
+		<MediaPlayerTooltip tooltip={tooltipText}>
+			<PlayerButton
+				type="button"
+				aria-controls={context.mediaId}
+				aria-label={
+					isProcessing
+						? "Audio enhancement in progress"
+						: enhancedAudioEnabled
+							? "Disable enhanced audio"
+							: "Enable enhanced audio"
+				}
+				aria-pressed={enhancedAudioEnabled}
+				data-disabled={isDisabled ? "" : undefined}
+				data-slot="media-player-enhanced-audio"
+				data-state={enhancedAudioEnabled ? "on" : "off"}
+				disabled={isDisabled}
+				{...enhancedAudioProps}
+				variant="ghost"
+				size="icon"
+				className={cn(
+					"size-8",
+					enhancedAudioEnabled && "text-blue-500",
+					className,
+				)}
+				onClick={onEnhancedAudioToggle}
+			>
+				{children ??
+					(isProcessing ? (
+						<Loader2Icon className="animate-spin" />
+					) : (
+						<SparklesIcon />
+					))}
+			</PlayerButton>
+		</MediaPlayerTooltip>
+	);
+}
+
+interface EnhancedAudioSyncProps {
+	enhancedAudioRef: React.RefObject<HTMLAudioElement | null>;
+	videoRef: React.RefObject<HTMLVideoElement | null>;
+	enhancedAudioEnabled: boolean;
+}
+
+function EnhancedAudioSync({
+	enhancedAudioRef,
+	videoRef,
+	enhancedAudioEnabled,
+}: EnhancedAudioSyncProps) {
+	const mediaVolume = useMediaSelector((state) => state.mediaVolume ?? 1);
+
+	const syncEnhancedAudio = React.useCallback(() => {
+		if (!enhancedAudioRef.current || !videoRef.current) return;
+		enhancedAudioRef.current.currentTime = videoRef.current.currentTime;
+		enhancedAudioRef.current.playbackRate = videoRef.current.playbackRate;
+	}, [enhancedAudioRef, videoRef]);
+
+	React.useEffect(() => {
+		const video = videoRef.current;
+		const audio = enhancedAudioRef.current;
+		if (!video || !audio) return;
+
+		const handlePlay = () => {
+			if (enhancedAudioEnabled) {
+				syncEnhancedAudio();
+				audio.play().catch(() => {});
+			}
+		};
+
+		const handlePause = () => {
+			audio.pause();
+		};
+
+		const handleSeeked = () => {
+			if (enhancedAudioEnabled) {
+				syncEnhancedAudio();
+			}
+		};
+
+		const handleRateChange = () => {
+			if (enhancedAudioEnabled) {
+				audio.playbackRate = video.playbackRate;
+			}
+		};
+
+		video.addEventListener("play", handlePlay);
+		video.addEventListener("pause", handlePause);
+		video.addEventListener("seeked", handleSeeked);
+		video.addEventListener("ratechange", handleRateChange);
+
+		return () => {
+			video.removeEventListener("play", handlePlay);
+			video.removeEventListener("pause", handlePause);
+			video.removeEventListener("seeked", handleSeeked);
+			video.removeEventListener("ratechange", handleRateChange);
+		};
+	}, [enhancedAudioEnabled, syncEnhancedAudio, videoRef, enhancedAudioRef]);
+
+	React.useEffect(() => {
+		const video = videoRef.current;
+		const audio = enhancedAudioRef.current;
+		if (!video || !audio) return;
+
+		if (enhancedAudioEnabled) {
+			video.muted = true;
+			audio.volume = mediaVolume;
+			syncEnhancedAudio();
+			if (!video.paused) {
+				audio.play().catch(() => {});
+			}
+		} else {
+			video.muted = false;
+			audio.pause();
+		}
+	}, [
+		enhancedAudioEnabled,
+		mediaVolume,
+		syncEnhancedAudio,
+		videoRef,
+		enhancedAudioRef,
+	]);
+
+	return null;
+}
+
 interface MediaPlayerDownloadProps
 	extends React.ComponentProps<typeof Button> {}
 
@@ -2836,7 +3012,11 @@ function MediaPlayerDownload(props: MediaPlayerDownloadProps) {
 	);
 }
 
-interface MediaPlayerSettingsProps extends MediaPlayerPlaybackSpeedProps {}
+interface MediaPlayerSettingsProps extends MediaPlayerPlaybackSpeedProps {
+	enhancedAudioStatus?: EnhancedAudioStatus | null;
+	enhancedAudioEnabled?: boolean;
+	setEnhancedAudioEnabled?: (enabled: boolean) => void;
+}
 
 function MediaPlayerSettings(props: MediaPlayerSettingsProps) {
 	const {
@@ -2849,6 +3029,9 @@ function MediaPlayerSettings(props: MediaPlayerSettingsProps) {
 		modal = false,
 		className,
 		disabled,
+		enhancedAudioStatus,
+		enhancedAudioEnabled,
+		setEnhancedAudioEnabled,
 		...settingsProps
 	} = props;
 
@@ -2997,6 +3180,18 @@ function MediaPlayerSettings(props: MediaPlayerSettingsProps) {
 						))}
 					</DropdownMenuSubContent>
 				</DropdownMenuSub>
+				{enhancedAudioStatus === "COMPLETE" && (
+					<DropdownMenuItem
+						className="justify-between"
+						onSelect={() => setEnhancedAudioEnabled?.(!enhancedAudioEnabled)}
+					>
+						<span className="flex items-center gap-2">
+							<SparklesIcon className="size-4" />
+							Enhanced Audio
+						</span>
+						{enhancedAudioEnabled && <CheckIcon />}
+					</DropdownMenuItem>
+				)}
 				{context.isVideo && mediaRenditionList.length > 0 && (
 					<DropdownMenuSub>
 						<DropdownMenuSubTrigger>
@@ -3151,11 +3346,12 @@ export {
 	MediaPlayerFullscreen,
 	MediaPlayerPiP,
 	MediaPlayerCaptions,
+	MediaPlayerEnhancedAudio,
 	MediaPlayerDownload,
 	MediaPlayerSettings,
 	MediaPlayerPortal,
 	MediaPlayerTooltip,
-	//
+	EnhancedAudioSync,
 	MediaPlayerRoot as Root,
 	MediaPlayerVideo as Video,
 	MediaPlayerAudio as Audio,
@@ -3175,11 +3371,11 @@ export {
 	MediaPlayerFullscreen as Fullscreen,
 	MediaPlayerPiP as PiP,
 	MediaPlayerCaptions as Captions,
+	MediaPlayerEnhancedAudio as EnhancedAudio,
 	MediaPlayerDownload as Download,
 	MediaPlayerSettings as Settings,
 	MediaPlayerPortal as Portal,
 	MediaPlayerTooltip as Tooltip,
-	//
 	useMediaSelector as useMediaPlayer,
 	useStoreSelector as useMediaPlayerStore,
 };
