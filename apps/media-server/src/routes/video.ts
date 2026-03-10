@@ -19,14 +19,14 @@ import type { VideoMetadata } from "../lib/job-manager";
 import {
 	canAcceptNewVideoProcess,
 	createJob,
-	decrementActiveVideoProcesses,
 	deleteJob,
 	generateJobId,
 	getActiveVideoProcessCount,
 	getAllJobs,
 	getJob,
 	getJobProgress,
-	incrementActiveVideoProcesses,
+	getMaxConcurrentVideoProcesses,
+	getSystemResources,
 	sendWebhook,
 	updateJob,
 } from "../lib/job-manager";
@@ -62,6 +62,10 @@ const processSchema = z.object({
 	remuxOnly: z.boolean().optional(),
 });
 
+function getInstanceId(): string {
+	return process.env.HOSTNAME || `pid-${process.pid}`;
+}
+
 function isBusyError(err: unknown): boolean {
 	return err instanceof Error && err.message.includes("Server is busy");
 }
@@ -72,11 +76,17 @@ function isTimeoutError(err: unknown): boolean {
 
 video.get("/status", (c) => {
 	const jobs = getAllJobs();
+	const resources = getSystemResources();
 	return c.json({
+		instanceId: getInstanceId(),
+		pid: process.pid,
 		activeVideoProcesses: getActiveVideoProcessCount(),
+		maxConcurrentVideoProcesses: getMaxConcurrentVideoProcesses(),
+		effectiveMaxVideoProcesses: resources.effectiveMax,
 		activeProbeProcesses: getActiveProbeProcessCount(),
 		canAcceptNewVideoProcess: canAcceptNewVideoProcess(),
 		canAcceptNewProbeProcess: canAcceptNewProbeProcess(),
+		resources,
 		jobCount: jobs.length,
 		jobs: jobs.map((j) => ({
 			jobId: j.jobId,
@@ -230,12 +240,30 @@ video.post("/process", async (c) => {
 	}
 
 	if (!canAcceptNewVideoProcess()) {
+		const activeVideoProcesses = getActiveVideoProcessCount();
+		const resources = getSystemResources();
+		const jobs = getAllJobs();
 		return c.json(
 			{
 				error: "Server is busy",
 				code: "SERVER_BUSY",
-				details:
-					"Too many concurrent video processing jobs, please retry later",
+				details: resources.throttleReason
+					? `Throttled: ${resources.throttleReason} (${activeVideoProcesses}/${resources.effectiveMax} active)`
+					: `Too many concurrent video processing jobs (${activeVideoProcesses}/${resources.effectiveMax}), please retry later`,
+				instanceId: getInstanceId(),
+				pid: process.pid,
+				activeVideoProcesses,
+				maxConcurrentVideoProcesses: getMaxConcurrentVideoProcesses(),
+				effectiveMaxVideoProcesses: resources.effectiveMax,
+				resources,
+				jobCount: jobs.length,
+				jobs: jobs.map((job) => ({
+					jobId: job.jobId,
+					videoId: job.videoId,
+					phase: job.phase,
+					progress: job.progress,
+					updatedAt: job.updatedAt,
+				})),
 			},
 			503,
 		);
@@ -252,8 +280,6 @@ video.post("/process", async (c) => {
 
 	const jobId = generateJobId();
 	const job = createJob(jobId, videoId, userId, webhookUrl);
-
-	incrementActiveVideoProcesses();
 
 	processVideoAsync(
 		job.jobId,
@@ -472,7 +498,6 @@ async function processVideoAsync(
 ): Promise<void> {
 	const job = getJob(jobId);
 	if (!job) {
-		decrementActiveVideoProcesses();
 		return;
 	}
 
@@ -597,8 +622,6 @@ async function processVideoAsync(
 		}
 		await repairedTempFile?.cleanup();
 		await lastResortRepairFile?.cleanup();
-	} finally {
-		decrementActiveVideoProcesses();
 	}
 }
 
