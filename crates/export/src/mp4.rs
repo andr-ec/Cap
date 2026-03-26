@@ -506,7 +506,6 @@ struct Nv12ExportFrame {
     height: u32,
     y_stride: u32,
     pts: i64,
-    audio: Option<ffmpeg::frame::Audio>,
 }
 
 #[cfg(test)]
@@ -585,7 +584,7 @@ async fn export_render_to_channel(
     mut on_progress: impl FnMut(u32) -> bool + Send + 'static,
     project_path: PathBuf,
 ) -> Result<(), cap_rendering::RenderingError> {
-    let (tx_image_data, mut video_rx) = tokio::sync::mpsc::channel::<(Nv12RenderedFrame, u32)>(2);
+    let (tx_image_data, mut video_rx) = tokio::sync::mpsc::channel::<(Nv12RenderedFrame, u32)>(8);
 
     let screenshot_project_path = project_path;
 
@@ -746,7 +745,6 @@ mod tests {
             height,
             y_stride: width,
             pts: 42,
-            audio: None,
         };
 
         let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height);

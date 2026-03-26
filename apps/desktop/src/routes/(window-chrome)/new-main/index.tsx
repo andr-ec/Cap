@@ -72,6 +72,7 @@ import IconCapSettings from "~icons/cap/settings";
 import IconLucideAppWindowMac from "~icons/lucide/app-window-mac";
 import IconLucideArrowLeft from "~icons/lucide/arrow-left";
 import IconLucideBug from "~icons/lucide/bug";
+import IconLucideCircleHelp from "~icons/lucide/circle-help";
 import IconLucideImage from "~icons/lucide/image";
 import IconLucideImport from "~icons/lucide/import";
 import IconLucideSearch from "~icons/lucide/search";
@@ -959,6 +960,22 @@ function createUpdateCheck() {
 	});
 }
 
+function MainWindowHelpButton() {
+	return (
+		<Tooltip content={<span>Help & Tour</span>}>
+			<button
+				type="button"
+				onClick={() => {
+					commands.showWindow("Onboarding");
+				}}
+				class="flex shrink-0 justify-center items-center size-5 focus:outline-none"
+			>
+				<IconLucideCircleHelp class="transition-colors text-gray-11 size-4 hover:text-gray-12" />
+			</button>
+		</Tooltip>
+	);
+}
+
 function Page() {
 	const { rawOptions, setOptions } = useRecordingOptions();
 	const currentRecording = createCurrentRecordingQuery();
@@ -1685,13 +1702,14 @@ function Page() {
 		>
 			<WindowChromeHeader hideMaximize>
 				<div
-					class={cx(
-						"flex items-center mx-2 w-full",
-						ostype() === "macos" && "flex-row-reverse",
-					)}
+					class="flex flex-1 gap-1 items-center mx-2 min-w-0"
 					data-tauri-drag-region
 				>
-					<div class="flex gap-1 items-center" data-tauri-drag-region>
+					<Show when={ostype() === "macos"}>
+						<MainWindowHelpButton />
+					</Show>
+					<div class="flex-1 min-h-9 min-w-0" data-tauri-drag-region />
+					<div class="flex gap-1 items-center shrink-0" data-tauri-drag-region>
 						<Tooltip content={<span>Settings</span>}>
 							<button
 								type="button"
@@ -1755,9 +1773,9 @@ function Page() {
 							</button>
 						)}
 					</div>
-					{ostype() === "macos" && (
-						<div class="flex-1" data-tauri-drag-region />
-					)}
+					<Show when={ostype() !== "macos"}>
+						<MainWindowHelpButton />
+					</Show>
 				</div>
 			</WindowChromeHeader>
 			<Show when={!activeMenu()}>
