@@ -139,6 +139,10 @@ impl CameraPreviewManager {
         self.preview.is_some()
     }
 
+    pub fn sender(&self) -> Option<flume::Sender<FFmpegVideoFrame>> {
+        self.preview.as_ref().map(|p| p.camera_tx.clone())
+    }
+
     pub fn notify_window_resized(&self, width: u32, height: u32) {
         if let Some(preview) = &self.preview {
             preview
@@ -721,7 +725,11 @@ impl Renderer {
                         }
                     },
                     _ = tokio::time::sleep(frame_timeout) => {
-                        warn!("Camera preview: no frames received within timeout, entering paused state");
+                        if received_first_frame {
+                            warn!("Camera preview: frames stalled, waiting for feed refresh");
+                            continue;
+                        }
+                        warn!("Camera preview: no frames received within startup timeout, entering paused state");
                         is_paused = true;
                         pause_and_hide();
                         continue 'main_loop;
