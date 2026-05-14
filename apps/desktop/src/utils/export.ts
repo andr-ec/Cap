@@ -1,45 +1,23 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { commands, type ExportSettings, type FramesRendered } from "./tauri";
 
+export async function beginExportSessionGuard() {
+	await invoke("begin_export_session");
+	let released = false;
+	return async () => {
+		if (released) return;
+		released = true;
+		await invoke("end_export_session").catch((error) => {
+			console.error("Failed to release export session guard", error);
+		});
+	};
+}
+
 export function createExportTask(
 	projectPath: string,
 	settings: ExportSettings,
 	onProgress: (progress: FramesRendered) => void,
 ) {
-	if (!import.meta.env.DEV) {
-		const promise = (async () => {
-			await invoke("begin_export_session");
-			try {
-				const exportPromise = invoke<string>(
-					"export_video_no_progress_detached",
-					{
-						projectPath,
-						settingsJson: JSON.stringify(settings),
-					},
-				);
-				try {
-					onProgress({
-						renderedCount: 0,
-						totalFrames: 1,
-						type: "FramesRendered",
-					});
-				} catch (error) {
-					console.error("Failed to handle initial export progress", error);
-				}
-				return await exportPromise;
-			} finally {
-				await invoke("end_export_session").catch((error) => {
-					console.error("Failed to release export session guard", error);
-				});
-			}
-		})();
-
-		return {
-			cancel: () => {},
-			promise,
-		};
-	}
-
 	const progress = new Channel<FramesRendered>((e) => {
 		onProgress(e);
 	});

@@ -60,7 +60,6 @@ async fn run_protected_export(
     }
 }
 
-const EXPORTER_ENV_BIN_PATH: &str = "CAP_EXPORTER_BIN";
 const EXPORTER_STDERR_TAIL_LIMIT: usize = 80;
 const EXPORT_PROGRESS_FORWARD_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 static ACTIVE_EXPORT_SESSIONS: AtomicUsize = AtomicUsize::new(0);
@@ -97,21 +96,11 @@ impl ExportWorkerMode {
 }
 
 #[derive(Clone)]
-enum ExportProgress {
-    Channel(tauri::ipc::Channel<FramesRendered>),
-    Disabled,
-}
+struct ExportProgress(tauri::ipc::Channel<FramesRendered>);
 
 impl ExportProgress {
     fn send(&self, progress: FramesRendered) -> bool {
-        match self {
-            Self::Channel(channel) => channel.send(progress).is_ok(),
-            Self::Disabled => true,
-        }
-    }
-
-    fn enabled(&self) -> bool {
-        matches!(self, Self::Channel(_))
+        self.0.send(progress).is_ok()
     }
 }
 
@@ -128,15 +117,7 @@ impl ExportProgressForwarder {
         }
     }
 
-    fn enabled(&self) -> bool {
-        self.progress.enabled()
-    }
-
     fn send(&mut self, rendered_count: u32, total_frames: u32) -> bool {
-        if !self.progress.enabled() {
-            return true;
-        }
-
         let now = std::time::Instant::now();
         let should_emit = rendered_count == 0
             || rendered_count >= total_frames
@@ -295,11 +276,7 @@ async fn run_out_of_process_export_attempt(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    if progress_forwarder.enabled() {
-        command.arg("--progress-json");
-    } else {
-        command.arg("--completion-json");
-    }
+    command.arg("--progress-json");
 
     if force_ffmpeg_decoder {
         command.arg("--force-ffmpeg-decoder");
@@ -416,36 +393,12 @@ async fn collect_exporter_stderr_tail(stderr: tokio::process::ChildStderr) -> Ve
 }
 
 fn resolve_exporter_binary() -> Result<PathBuf, String> {
-    if let Ok(override_path) = std::env::var(EXPORTER_ENV_BIN_PATH) {
-        let path = PathBuf::from(override_path);
-        if path.exists() {
-            return Ok(path);
-        }
-        return Err(format!(
-            "{EXPORTER_ENV_BIN_PATH} points to missing path: {}",
-            path.display()
-        ));
-    }
-
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     if let Some(dir) = exe.parent() {
-        // In dev, `cap.exe` is the binary Cargo rebuilds; stale `cap-exporter.exe` copies were
-        // the reason desktop exports lagged behind the fast CLI path during this fix.
-        if cfg!(debug_assertions) {
-            let candidate = dir.join(cli_bin_name());
+        for candidate in adjacent_exporter_binary_candidates(dir) {
             if candidate.exists() {
                 return Ok(candidate);
             }
-        }
-
-        let candidate = dir.join(exporter_bin_name());
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-
-        let candidate = dir.join("..").join("MacOS").join(exporter_bin_name());
-        if candidate.exists() {
-            return Ok(candidate);
         }
     }
 
@@ -460,15 +413,13 @@ fn resolve_exporter_binary() -> Result<PathBuf, String> {
     }
 
     Err(format!(
-        "Export worker binary not found; set {EXPORTER_ENV_BIN_PATH} or place {} next to the app executable",
+        "Export worker binary not found; place {} next to the app executable or build the Tauri sidecar bundle",
         exporter_bin_name()
     ))
 }
 
 fn exporter_binary_candidates(root: &Path) -> Vec<PathBuf> {
     let mut candidates = vec![
-        root.join("target").join("debug").join(cli_bin_name()),
-        root.join("target").join("release").join(cli_bin_name()),
         root.join("apps")
             .join("desktop")
             .join("src-tauri")
@@ -477,15 +428,7 @@ fn exporter_binary_candidates(root: &Path) -> Vec<PathBuf> {
     ];
 
     if let Some(target_triple) = current_target_triple() {
-        candidates.extend([
-            root.join("target")
-                .join(target_triple)
-                .join("debug")
-                .join(cli_bin_name()),
-            root.join("target")
-                .join(target_triple)
-                .join("release")
-                .join(cli_bin_name()),
+        candidates.push(
             root.join("apps")
                 .join("desktop")
                 .join("src-tauri")
@@ -494,7 +437,32 @@ fn exporter_binary_candidates(root: &Path) -> Vec<PathBuf> {
                     "cap-exporter-{target_triple}{}",
                     std::env::consts::EXE_SUFFIX
                 )),
-        ]);
+        );
+    }
+
+    candidates
+}
+
+fn adjacent_exporter_binary_candidates(dir: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    candidates.push(dir.join(exporter_bin_name()));
+
+    if let Some(target_triple) = current_target_triple() {
+        candidates.push(dir.join(format!(
+            "cap-exporter-{target_triple}{}",
+            std::env::consts::EXE_SUFFIX
+        )));
+    }
+
+    for subdir in ["../MacOS", "../Resources"] {
+        candidates.push(dir.join(subdir).join(exporter_bin_name()));
+        if let Some(target_triple) = current_target_triple() {
+            candidates.push(dir.join(subdir).join(format!(
+                "cap-exporter-{target_triple}{}",
+                std::env::consts::EXE_SUFFIX
+            )));
+        }
     }
 
     candidates
@@ -513,6 +481,10 @@ fn current_target_triple() -> Option<&'static str> {
         target_env = "msvc"
     )) {
         Some("aarch64-pc-windows-msvc")
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Some("aarch64-apple-darwin")
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        Some("x86_64-apple-darwin")
     } else {
         None
     }
@@ -524,10 +496,6 @@ fn exporter_bin_name() -> &'static str {
     } else {
         "cap-exporter"
     }
-}
-
-fn cli_bin_name() -> &'static str {
-    if cfg!(windows) { "cap.exe" } else { "cap" }
 }
 
 struct ExportActiveGuard<'a>(&'a AtomicBool);
@@ -675,16 +643,8 @@ fn should_force_ffmpeg_export(_project_path: &Path, settings: &ExportSettings) -
     settings.force_ffmpeg_decoder()
 }
 
-fn should_force_ffmpeg_preview() -> bool {
-    should_use_windows_release_ffmpeg_workaround()
-}
-
 fn should_use_out_of_process_export() -> bool {
     cfg!(any(target_os = "macos", target_os = "windows"))
-}
-
-fn should_use_windows_release_ffmpeg_workaround() -> bool {
-    cfg!(all(target_os = "windows", not(debug_assertions)))
 }
 
 #[tauri::command]
@@ -696,46 +656,7 @@ pub async fn export_video(
     settings: ExportSettings,
     editor: OptionalWindowEditorInstance,
 ) -> Result<PathBuf, String> {
-    export_video_inner(
-        project_path,
-        settings,
-        editor,
-        ExportProgress::Channel(progress),
-    )
-    .await
-}
-
-#[tauri::command]
-#[specta::specta]
-#[instrument(skip(editor))]
-pub async fn export_video_no_progress(
-    project_path: PathBuf,
-    settings: ExportSettings,
-    editor: OptionalWindowEditorInstance,
-) -> Result<PathBuf, String> {
-    export_video_inner(project_path, settings, editor, ExportProgress::Disabled).await
-}
-
-#[tauri::command]
-#[specta::specta]
-#[instrument(skip(settings_json))]
-pub async fn export_video_no_progress_detached(
-    project_path: PathBuf,
-    settings_json: String,
-) -> Result<PathBuf, String> {
-    info!(
-        project_path = %project_path.display(),
-        "Starting detached no-progress export command"
-    );
-    let settings = serde_json::from_str::<ExportSettings>(&settings_json)
-        .map_err(|e| format!("Invalid export settings JSON: {e}"))?;
-    export_video_inner(
-        project_path,
-        settings,
-        OptionalWindowEditorInstance(None),
-        ExportProgress::Disabled,
-    )
-    .await
+    export_video_inner(project_path, settings, editor, ExportProgress(progress)).await
 }
 
 async fn export_video_inner(
@@ -749,7 +670,6 @@ async fn export_video_inner(
     info!(
         project_path = %project_path.display(),
         force_ffmpeg,
-        progress = progress.enabled(),
         settings = ?settings,
         "Starting export"
     );
@@ -993,7 +913,7 @@ async fn generate_export_preview_inner(
         .map_err(|e| format!("Failed to create render constants: {e}"))?,
     );
 
-    let force_ffmpeg = should_force_ffmpeg_preview();
+    let force_ffmpeg = false;
     info!(
         project_path = %project_path.display(),
         force_ffmpeg,
@@ -1207,7 +1127,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_exports_force_ffmpeg_in_release_builds_without_explicit_setting() {
+    fn windows_exports_do_not_force_ffmpeg_without_explicit_setting() {
         let dir = tempdir().unwrap();
 
         let gif_settings = ExportSettings::Gif(cap_export::gif::GifExportSettings {
@@ -1216,10 +1136,7 @@ mod tests {
             quality: None,
         });
 
-        assert_eq!(
-            should_force_ffmpeg_export(dir.path(), &gif_settings),
-            !cfg!(debug_assertions)
-        );
+        assert!(!should_force_ffmpeg_export(dir.path(), &gif_settings));
     }
 }
 
