@@ -26,7 +26,7 @@ use cap_recording::{
     },
     studio_recording,
 };
-use cap_rendering::ProjectRecordingsMeta;
+use cap_rendering::{ProjectRecordingsMeta, STANDARD_CURSOR_HEIGHT};
 use cap_utils::{ensure_dir, moment_format_to_chrono, spawn_actor};
 use cpal::traits::DeviceTrait;
 use futures::{FutureExt, stream};
@@ -39,14 +39,14 @@ use std::borrow::Cow;
 use std::error::Error as StdError;
 use std::{
     any::Any,
-    collections::{BTreeSet, HashMap, VecDeque},
+    collections::BTreeSet,
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
     time::Duration,
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, path::BaseDirectory};
 use tauri_plugin_dialog::{DialogExt, MessageDialogBuilder};
 use tauri_specta::Event;
 use tracing::*;
@@ -236,6 +236,7 @@ impl InProgressRecording {
                 Ok(recording) => Ok(CompletedRecording::Studio {
                     recording,
                     target_name: common.target_name,
+                    capture_target: common.inputs.capture_target,
                 }),
                 Err(e) => Err((e, None)),
             },
@@ -281,6 +282,7 @@ pub enum CompletedRecording {
     Studio {
         recording: studio_recording::CompletedRecording,
         target_name: String,
+        capture_target: ScreenCaptureTarget,
     },
 }
 
@@ -2336,7 +2338,11 @@ async fn handle_recording_finish(
     std::fs::create_dir_all(&screenshots_dir).ok();
 
     let (meta_inner, sharing) = match completed_recording {
-        CompletedRecording::Studio { recording, .. } => {
+        CompletedRecording::Studio {
+            recording,
+            capture_target,
+            ..
+        } => {
             let meta_inner = RecordingMetaInner::Studio(Box::new(recording.meta.clone()));
 
             if let Ok(mut meta) = RecordingMeta::load_for_project(&recording_dir).map_err(|err| {
@@ -2402,6 +2408,7 @@ async fn handle_recording_finish(
                         screenshots_dir,
                         recording,
                         default_preset,
+                        Some(capture_target),
                     )
                     .await;
 
@@ -2445,6 +2452,7 @@ async fn handle_recording_finish(
                 },
                 &recordings,
                 PresetsStore::get_default_preset(app)?.map(|p| p.config),
+                Some(&capture_target),
             );
 
             config.write(&recording_dir).map_err(|e| e.to_string())?;
@@ -2634,6 +2642,7 @@ async fn finalize_studio_recording(
     screenshots_dir: PathBuf,
     recording: cap_recording::studio_recording::CompletedRecording,
     default_preset: Option<ProjectConfiguration>,
+    capture_target: Option<ScreenCaptureTarget>,
 ) -> Result<(), String> {
     info!("Starting background finalization for recording");
 
@@ -2689,6 +2698,7 @@ async fn finalize_studio_recording(
         },
         &recordings,
         default_preset,
+        capture_target.as_ref(),
     );
 
     config
@@ -2700,41 +2710,28 @@ async fn finalize_studio_recording(
     Ok(())
 }
 
-/// Core logic for generating zoom segments based on mouse click events.
-/// This is an experimental feature that automatically creates zoom effects
-/// around user interactions to highlight important moments.
 fn generate_zoom_segments_from_clicks_impl(
     mut clicks: Vec<CursorClickEvent>,
-    mut moves: Vec<CursorMoveEvent>,
+    _moves: Vec<CursorMoveEvent>,
     max_duration: f64,
 ) -> Vec<ZoomSegment> {
-    const STOP_PADDING_SECONDS: f64 = 0.5;
-    const CLICK_GROUP_TIME_THRESHOLD_SECS: f64 = 2.5;
-    const CLICK_GROUP_SPATIAL_THRESHOLD: f64 = 0.15;
-    const CLICK_PRE_PADDING: f64 = 0.4;
-    const CLICK_POST_PADDING: f64 = 1.8;
-    const MOVEMENT_PRE_PADDING: f64 = 0.3;
-    const MOVEMENT_POST_PADDING: f64 = 1.5;
-    const MERGE_GAP_THRESHOLD: f64 = 0.8;
-    const MIN_SEGMENT_DURATION: f64 = 1.0;
-    const MOVEMENT_WINDOW_SECONDS: f64 = 1.5;
-    const MOVEMENT_EVENT_DISTANCE_THRESHOLD: f64 = 0.02;
-    const MOVEMENT_WINDOW_DISTANCE_THRESHOLD: f64 = 0.08;
-    const AUTO_ZOOM_AMOUNT: f64 = 1.5;
-    const SHAKE_FILTER_THRESHOLD: f64 = 0.33;
-    const SHAKE_FILTER_WINDOW_MS: f64 = 150.0;
+    const MS_PER_SECOND: f64 = 1000.0;
+    const START_MIN_MS: f64 = 1.0;
+    const CLICK_PRE_PADDING_MS: f64 = 300.0;
+    const CLICK_POST_PADDING_MS: f64 = 2500.0;
+    const CLICK_END_CLAMP_PADDING_MS: f64 = 800.0;
+    const TRAILING_CLICK_IGNORE_MS: f64 = 1000.0;
+    const MERGE_GAP_MS: f64 = 2500.0;
+    const AUTO_ZOOM_AMOUNT: f64 = 2.0;
 
     if max_duration <= 0.0 {
         return Vec::new();
     }
 
-    let activity_end_limit = if max_duration > STOP_PADDING_SECONDS {
-        max_duration - STOP_PADDING_SECONDS
-    } else {
-        max_duration
-    };
-
-    if activity_end_limit <= f64::EPSILON {
+    let duration_ms = max_duration * MS_PER_SECOND;
+    let click_cutoff_ms = duration_ms - TRAILING_CLICK_IGNORE_MS;
+    let end_limit_ms = duration_ms - CLICK_END_CLAMP_PADDING_MS;
+    if click_cutoff_ms <= 0.0 || end_limit_ms <= START_MIN_MS {
         return Vec::new();
     }
 
@@ -2743,182 +2740,16 @@ fn generate_zoom_segments_from_clicks_impl(
             .partial_cmp(&b.time_ms)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    moves.sort_by(|a, b| {
-        a.time_ms
-            .partial_cmp(&b.time_ms)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    while let Some(index) = clicks.iter().rposition(|c| c.down) {
-        let time_secs = clicks[index].time_ms / 1000.0;
-        if time_secs > activity_end_limit {
-            clicks.remove(index);
-        } else {
-            break;
-        }
-    }
-
-    let click_positions: HashMap<usize, (f64, f64)> = clicks
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.down)
-        .filter_map(|(idx, click)| {
-            let click_time = click.time_ms;
-            moves
-                .iter()
-                .rfind(|m| m.time_ms <= click_time)
-                .map(|m| (idx, (m.x, m.y)))
-        })
-        .collect();
-
-    let mut click_groups: Vec<Vec<usize>> = Vec::new();
-    let down_clicks: Vec<(usize, &CursorClickEvent)> = clicks
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.down && c.time_ms / 1000.0 < activity_end_limit)
-        .collect();
-
-    for (idx, click) in &down_clicks {
-        let click_time = click.time_ms / 1000.0;
-        let click_pos = click_positions.get(idx);
-
-        let mut found_group = false;
-        for group in click_groups.iter_mut() {
-            let can_join = group.iter().any(|&group_idx| {
-                let group_click = &clicks[group_idx];
-                let group_time = group_click.time_ms / 1000.0;
-                let time_close = (click_time - group_time).abs() < CLICK_GROUP_TIME_THRESHOLD_SECS;
-
-                let spatial_close = match (click_pos, click_positions.get(&group_idx)) {
-                    (Some((x1, y1)), Some((x2, y2))) => {
-                        let dx = x1 - x2;
-                        let dy = y1 - y2;
-                        (dx * dx + dy * dy).sqrt() < CLICK_GROUP_SPATIAL_THRESHOLD
-                    }
-                    _ => true,
-                };
-
-                time_close && spatial_close
-            });
-
-            if can_join {
-                group.push(*idx);
-                found_group = true;
-                break;
-            }
-        }
-
-        if !found_group {
-            click_groups.push(vec![*idx]);
-        }
-    }
 
     let mut intervals: Vec<(f64, f64)> = Vec::new();
-
-    for group in click_groups {
-        if group.is_empty() {
+    for click in clicks {
+        let time_ms = click.time_ms.floor();
+        if time_ms >= click_cutoff_ms {
             continue;
         }
 
-        let times: Vec<f64> = group
-            .iter()
-            .map(|&idx| clicks[idx].time_ms / 1000.0)
-            .collect();
-        let group_start = times.iter().cloned().fold(f64::INFINITY, f64::min);
-        let group_end = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-
-        let start = (group_start - CLICK_PRE_PADDING).max(0.0);
-        let end = (group_end + CLICK_POST_PADDING).min(activity_end_limit);
-
-        if end > start {
-            intervals.push((start, end));
-        }
-    }
-
-    let mut last_move_by_cursor: HashMap<String, (f64, f64, f64)> = HashMap::new();
-    let mut distance_window: VecDeque<(f64, f64)> = VecDeque::new();
-    let mut window_distance = 0.0_f64;
-    let mut shake_window: VecDeque<(f64, f64, f64)> = VecDeque::new();
-
-    for mv in moves.iter() {
-        let time = mv.time_ms / 1000.0;
-        if time >= activity_end_limit {
-            break;
-        }
-
-        let distance = if let Some((_, last_x, last_y)) = last_move_by_cursor.get(&mv.cursor_id) {
-            let dx = mv.x - last_x;
-            let dy = mv.y - last_y;
-            (dx * dx + dy * dy).sqrt()
-        } else {
-            0.0
-        };
-
-        last_move_by_cursor.insert(mv.cursor_id.clone(), (time, mv.x, mv.y));
-
-        if distance <= f64::EPSILON {
-            continue;
-        }
-
-        shake_window.push_back((mv.time_ms, mv.x, mv.y));
-        while let Some(&(old_time, _, _)) = shake_window.front() {
-            if mv.time_ms - old_time > SHAKE_FILTER_WINDOW_MS {
-                shake_window.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        if shake_window.len() >= 3 {
-            let positions: Vec<(f64, f64)> =
-                shake_window.iter().map(|(_, x, y)| (*x, *y)).collect();
-            let mut direction_changes = 0;
-            for i in 1..positions.len() - 1 {
-                let dx1 = positions[i].0 - positions[i - 1].0;
-                let dy1 = positions[i].1 - positions[i - 1].1;
-                let dx2 = positions[i + 1].0 - positions[i].0;
-                let dy2 = positions[i + 1].1 - positions[i].1;
-
-                if (dx1 * dx2 + dy1 * dy2) < 0.0 {
-                    direction_changes += 1;
-                }
-            }
-
-            let total_dist: f64 = positions
-                .windows(2)
-                .map(|w| ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt())
-                .sum();
-
-            if direction_changes >= 2 && total_dist < SHAKE_FILTER_THRESHOLD * 3.0 {
-                continue;
-            }
-        }
-
-        distance_window.push_back((time, distance));
-        window_distance += distance;
-
-        while let Some(&(old_time, old_distance)) = distance_window.front() {
-            if time - old_time > MOVEMENT_WINDOW_SECONDS {
-                distance_window.pop_front();
-                window_distance -= old_distance;
-            } else {
-                break;
-            }
-        }
-
-        if window_distance < 0.0 {
-            window_distance = 0.0;
-        }
-
-        let significant_movement = distance >= MOVEMENT_EVENT_DISTANCE_THRESHOLD
-            || window_distance >= MOVEMENT_WINDOW_DISTANCE_THRESHOLD;
-
-        if !significant_movement {
-            continue;
-        }
-
-        let start = (time - MOVEMENT_PRE_PADDING).max(0.0);
-        let end = (time + MOVEMENT_POST_PADDING).min(activity_end_limit);
+        let start = (time_ms - CLICK_PRE_PADDING_MS).max(START_MIN_MS);
+        let end = (time_ms + CLICK_POST_PADDING_MS).min(end_limit_ms);
 
         if end > start {
             intervals.push((start, end));
@@ -2934,7 +2765,7 @@ fn generate_zoom_segments_from_clicks_impl(
     let mut merged: Vec<(f64, f64)> = Vec::new();
     for interval in intervals {
         if let Some(last) = merged.last_mut()
-            && interval.0 <= last.1 + MERGE_GAP_THRESHOLD
+            && interval.0 <= last.1 + MERGE_GAP_MS
         {
             last.1 = last.1.max(interval.1);
             continue;
@@ -2944,22 +2775,15 @@ fn generate_zoom_segments_from_clicks_impl(
 
     merged
         .into_iter()
-        .filter_map(|(start, end)| {
-            let duration = end - start;
-            if duration < MIN_SEGMENT_DURATION {
-                return None;
-            }
-
-            Some(ZoomSegment {
-                start,
-                end,
-                amount: AUTO_ZOOM_AMOUNT,
-                mode: ZoomMode::Auto,
-                glide_direction: GlideDirection::None,
-                glide_speed: 0.5,
-                instant_animation: false,
-                edge_snap_ratio: 0.25,
-            })
+        .map(|(start, end)| ZoomSegment {
+            start: start.round() / MS_PER_SECOND,
+            end: end.round() / MS_PER_SECOND,
+            amount: AUTO_ZOOM_AMOUNT,
+            mode: ZoomMode::Auto,
+            glide_direction: GlideDirection::None,
+            glide_speed: 0.5,
+            instant_animation: false,
+            edge_snap_ratio: 0.25,
         })
         .collect()
 }
@@ -3028,12 +2852,16 @@ fn project_config_from_recording(
     completed_recording: &studio_recording::CompletedRecording,
     recordings: &ProjectRecordingsMeta,
     default_config: Option<ProjectConfiguration>,
+    capture_target: Option<&ScreenCaptureTarget>,
 ) -> ProjectConfiguration {
     let settings = GeneralSettingsStore::get(app)
         .unwrap_or(None)
         .unwrap_or_default();
 
+    let using_default_config = default_config.is_none();
     let mut config = default_config.unwrap_or_default();
+    config.cursor.size = default_cursor_size_for_recording(recordings);
+    apply_recording_presentation_defaults(app, &mut config, capture_target, using_default_config);
 
     let camera_preview_manager = CameraPreviewManager::new(app);
     if let Ok(camera_preview_state) = camera_preview_manager.get_state() {
@@ -3075,10 +2903,6 @@ fn project_config_from_recording(
         Vec::new()
     };
 
-    if !zoom_segments.is_empty() {
-        config.cursor.size = 200;
-    }
-
     config.timeline = Some(TimelineConfiguration {
         segments: timeline_segments,
         zoom_segments,
@@ -3090,6 +2914,89 @@ fn project_config_from_recording(
     });
 
     config
+}
+
+fn apply_recording_presentation_defaults(
+    app: &AppHandle,
+    config: &mut ProjectConfiguration,
+    capture_target: Option<&ScreenCaptureTarget>,
+    using_default_config: bool,
+) {
+    let default_wallpaper_path = if using_default_config {
+        app.path()
+            .resolve("assets/backgrounds/cities/sf.jpg", BaseDirectory::Resource)
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+
+    apply_screen_recording_presentation_defaults(
+        config,
+        capture_target,
+        using_default_config,
+        default_wallpaper_path,
+    );
+}
+
+fn apply_screen_recording_presentation_defaults(
+    config: &mut ProjectConfiguration,
+    capture_target: Option<&ScreenCaptureTarget>,
+    using_default_config: bool,
+    default_wallpaper_path: Option<String>,
+) {
+    use cap_project::{BackgroundSource, ScreenMovementSpring};
+
+    if matches!(capture_target, Some(ScreenCaptureTarget::CameraOnly)) {
+        return;
+    }
+
+    let has_default_background = matches!(
+        &config.background.source,
+        BackgroundSource::Color { value, alpha } if *value == [255, 255, 255] && *alpha == 255
+    );
+
+    if using_default_config && has_default_background {
+        if let Some(path) = default_wallpaper_path {
+            config.background.source = BackgroundSource::Wallpaper { path: Some(path) };
+        }
+    }
+
+    if config.background.padding <= f64::EPSILON {
+        config.background.padding = 10.0;
+    }
+
+    if matches!(
+        capture_target,
+        Some(ScreenCaptureTarget::Window { .. } | ScreenCaptureTarget::Display { .. })
+    ) && config.background.rounding <= f64::EPSILON
+    {
+        config.background.rounding = 2.0;
+    }
+
+    if (config.screen_movement_spring.stiffness - 120.0).abs() < f32::EPSILON
+        && (config.screen_movement_spring.damping - 14.0).abs() < f32::EPSILON
+        && (config.screen_movement_spring.mass - 1.0).abs() < f32::EPSILON
+    {
+        config.screen_movement_spring = ScreenMovementSpring::default();
+    }
+}
+
+fn default_cursor_size_for_recording(recordings: &ProjectRecordingsMeta) -> u32 {
+    const REGULAR_CURSOR_HEIGHT: f32 = 24.0;
+    const DEFAULT_CURSOR_SCALE: f32 = 2.0;
+    const MAX_RECORDING_HEIGHT_RATIO: f32 = 0.075;
+
+    let Some(first_segment) = recordings.segments.first() else {
+        return cap_project::CursorConfiguration::default().size;
+    };
+
+    let desired_height = (REGULAR_CURSOR_HEIGHT * DEFAULT_CURSOR_SCALE)
+        .min(first_segment.display.height as f32 * MAX_RECORDING_HEIGHT_RATIO);
+
+    (desired_height / STANDARD_CURSOR_HEIGHT * 100.0)
+        .round()
+        .clamp(45.0, 85.0) as u32
 }
 
 pub fn needs_fragment_remux(recording_dir: &Path, meta: &StudioRecordingMeta) -> bool {
@@ -3286,14 +3193,22 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn click_event(time_ms: f64) -> CursorClickEvent {
+    fn click_event_with_state(time_ms: f64, down: bool) -> CursorClickEvent {
         CursorClickEvent {
             active_modifiers: vec![],
             cursor_num: 0,
             cursor_id: "default".to_string(),
             time_ms,
-            down: true,
+            down,
         }
+    }
+
+    fn click_event(time_ms: f64) -> CursorClickEvent {
+        click_event_with_state(time_ms, true)
+    }
+
+    fn click_up_event(time_ms: f64) -> CursorClickEvent {
+        click_event_with_state(time_ms, false)
     }
 
     fn move_event(time_ms: f64, x: f64, y: f64) -> CursorMoveEvent {
@@ -3318,7 +3233,7 @@ mod tests {
     }
 
     #[test]
-    fn generates_segment_for_sustained_activity() {
+    fn merges_clicks_with_screen_studio_gap() {
         let clicks = vec![click_event(1_200.0), click_event(4_200.0)];
         let moves = vec![
             move_event(1_500.0, 0.10, 0.12),
@@ -3333,13 +3248,60 @@ mod tests {
             "expected activity to produce zoom segments"
         );
         let first = &segments[0];
-        assert!(first.start < first.end);
-        assert!(first.end - first.start >= 1.3);
-        assert!(first.end <= 19.5);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(first.start, 0.9);
+        assert_eq!(first.end, 6.7);
     }
 
     #[test]
-    fn ignores_cursor_jitter() {
+    fn separates_click_groups_across_long_idle_gap() {
+        let clicks = vec![
+            click_event(2_271.0),
+            click_event(9_137.0),
+            click_event(9_915.0),
+            click_event(19_404.0),
+        ];
+        let moves = vec![
+            move_event(562.0, 0.48, 0.50),
+            move_event(2_271.0, 0.05, 0.08),
+            move_event(9_137.0, 0.94, 0.06),
+            move_event(9_915.0, 0.94, 0.07),
+            move_event(19_364.0, 0.44, 0.95),
+        ];
+
+        let segments = generate_zoom_segments_from_clicks_impl(clicks, moves, 19.436_667);
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].start, 1.971);
+        assert_eq!(segments[0].end, 4.771);
+        assert_eq!(segments[1].start, 8.837);
+        assert_eq!(segments[1].end, 12.415);
+    }
+
+    #[test]
+    fn extends_segment_until_after_mouse_up() {
+        let clicks = vec![click_event(1_000.0), click_up_event(2_500.0)];
+
+        let segments = generate_zoom_segments_from_clicks_impl(clicks, vec![], 10.0);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].start, 0.7);
+        assert_eq!(segments[0].end, 5.0);
+    }
+
+    #[test]
+    fn clamps_zoom_end_before_recording_end() {
+        let clicks = vec![click_event(8_999.0), click_event(9_000.0)];
+
+        let segments = generate_zoom_segments_from_clicks_impl(clicks, vec![], 10.0);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].start, 8.699);
+        assert_eq!(segments[0].end, 9.2);
+    }
+
+    #[test]
+    fn does_not_zoom_without_clicks() {
         let jitter_moves = (0..30)
             .map(|i| {
                 let t = 1_000.0 + (i as f64) * 30.0;
@@ -3365,6 +3327,67 @@ mod tests {
         mark_fragmented_recording_for_ffmpeg_export(dir.path()).unwrap();
 
         assert!(fragmented_export_ffmpeg_marker_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn skips_screen_presentation_defaults_for_camera_only_recordings() {
+        let mut config = ProjectConfiguration::default();
+
+        apply_screen_recording_presentation_defaults(
+            &mut config,
+            Some(&ScreenCaptureTarget::CameraOnly),
+            true,
+            Some("wallpaper.jpg".to_string()),
+        );
+
+        assert_eq!(config.background.padding, 0.0);
+        assert!(matches!(
+            config.background.source,
+            cap_project::BackgroundSource::Color {
+                value: [255, 255, 255],
+                alpha: 255,
+            }
+        ));
+    }
+
+    #[test]
+    fn applies_screen_presentation_defaults_for_screen_recordings() {
+        let mut config = ProjectConfiguration::default();
+        let capture_target = ScreenCaptureTarget::Display {
+            id: "1".parse().unwrap(),
+        };
+
+        apply_screen_recording_presentation_defaults(
+            &mut config,
+            Some(&capture_target),
+            true,
+            Some("wallpaper.jpg".to_string()),
+        );
+
+        assert_eq!(config.background.padding, 10.0);
+        assert_eq!(config.background.rounding, 2.0);
+        assert!(matches!(
+            config.background.source,
+            cap_project::BackgroundSource::Wallpaper { path: Some(path) } if path == "wallpaper.jpg"
+        ));
+    }
+
+    #[test]
+    fn screen_presentation_defaults_apply_window_rounding_without_default_border() {
+        let mut config = ProjectConfiguration::default();
+        let capture_target = ScreenCaptureTarget::Window {
+            id: "1".parse().unwrap(),
+        };
+
+        apply_screen_recording_presentation_defaults(
+            &mut config,
+            Some(&capture_target),
+            true,
+            Some("wallpaper.jpg".to_string()),
+        );
+
+        assert_eq!(config.background.rounding, 2.0);
+        assert!(config.background.border.is_none());
     }
 
     #[test]
