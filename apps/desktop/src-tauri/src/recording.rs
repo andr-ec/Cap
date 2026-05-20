@@ -51,7 +51,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogBuilder};
 use tauri_specta::Event;
 use tracing::*;
 
-use crate::camera::{CameraPreviewManager, CameraPreviewShape, CameraPreviewState};
+use crate::camera::{CameraPreviewManager, CameraPreviewShape};
 #[cfg(target_os = "macos")]
 use crate::general_settings;
 use crate::permissions;
@@ -547,6 +547,190 @@ pub enum RecordingAction {
     UpgradeRequired,
 }
 
+const MICROPHONE_INPUT_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+const CAMERA_INPUT_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+fn camera_id_label(id: &camera::DeviceOrModelID) -> String {
+    match id {
+        camera::DeviceOrModelID::DeviceID(device_id) => device_id.clone(),
+        camera::DeviceOrModelID::ModelID(model_id) => format!("{model_id:?}"),
+    }
+}
+
+fn camera_lock_matches_id(lock: &CameraFeedLock, selected_id: &camera::DeviceOrModelID) -> bool {
+    let camera_info = lock.camera_info();
+    match selected_id {
+        camera::DeviceOrModelID::DeviceID(device_id) => camera_info.device_id() == device_id,
+        camera::DeviceOrModelID::ModelID(model_id) => camera_info.model_id() == Some(model_id),
+    }
+}
+
+async fn initialize_selected_camera(
+    camera_feed: &kameo::actor::ActorRef<camera::CameraFeed>,
+    id: &camera::DeviceOrModelID,
+    settings: Option<camera::CameraDeviceSettings>,
+) -> anyhow::Result<()> {
+    let label = camera_id_label(id);
+    let ready = camera_feed
+        .ask(camera::SetInput {
+            id: id.clone(),
+            settings,
+        })
+        .await
+        .map_err(|err| anyhow!("Failed to initialize selected camera '{label}': {err}"))?;
+
+    ready.await.map(|_| ()).map_err(|err| match err {
+        camera::SetInputError::DeviceNotFound => {
+            anyhow!("Selected camera '{label}' is no longer available")
+        }
+        err => anyhow!("Failed to initialize selected camera '{label}': {err}"),
+    })
+}
+
+async fn lock_initialized_camera(
+    camera_feed: &kameo::actor::ActorRef<camera::CameraFeed>,
+    id: &camera::DeviceOrModelID,
+) -> anyhow::Result<CameraFeedLock> {
+    let label = camera_id_label(id);
+    match camera_feed.ask(camera::Lock).await {
+        Ok(lock) => Ok(lock),
+        Err(kameo::error::SendError::HandlerError(camera::LockFeedError::NoInput)) => Err(anyhow!(
+            "Selected camera '{label}' did not become ready after initialization"
+        )),
+        Err(err) => Err(anyhow!("Failed to lock selected camera '{label}': {err}")),
+    }
+}
+
+async fn validate_camera_receiving(
+    lock: &CameraFeedLock,
+    id: &camera::DeviceOrModelID,
+) -> anyhow::Result<()> {
+    let label = camera_id_label(id);
+    let (tx, rx) = flume::bounded(1);
+    let remove_sender = tx.clone();
+
+    lock.ask(camera::AddSender(tx))
+        .await
+        .map_err(|err| anyhow!("Failed to probe selected camera '{label}': {err}"))?;
+
+    let result = tokio::time::timeout(CAMERA_INPUT_PROBE_TIMEOUT, rx.recv_async()).await;
+    let _ = lock.ask(camera::RemoveSender(remove_sender)).await;
+
+    match result {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(_)) => Err(anyhow!(
+            "Selected camera '{label}' stopped before sending a frame"
+        )),
+        Err(_) => Err(anyhow!(
+            "Selected camera '{label}' is not sending video frames"
+        )),
+    }
+}
+
+async fn lock_selected_camera(
+    camera_feed: &kameo::actor::ActorRef<camera::CameraFeed>,
+    selected_id: Option<camera::DeviceOrModelID>,
+    selected_settings: Option<camera::CameraDeviceSettings>,
+    capture_target: &ScreenCaptureTarget,
+) -> anyhow::Result<Option<Arc<CameraFeedLock>>> {
+    let Some(id) = selected_id else {
+        if matches!(capture_target, ScreenCaptureTarget::CameraOnly) {
+            return Err(anyhow!(
+                "Camera-only recording requires a selected camera. Please select a camera before starting."
+            ));
+        }
+
+        return Ok(None);
+    };
+
+    let existing_lock = match camera_feed.ask(camera::Lock).await {
+        Ok(lock) if camera_lock_matches_id(&lock, &id) => Some(lock),
+        Ok(lock) => {
+            drop(lock);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            None
+        }
+        Err(kameo::error::SendError::HandlerError(camera::LockFeedError::NoInput)) => None,
+        Err(err) => {
+            return Err(anyhow!(
+                "Failed to lock selected camera '{}': {err}",
+                camera_id_label(&id)
+            ));
+        }
+    };
+
+    let lock = if let Some(lock) = existing_lock {
+        lock
+    } else {
+        initialize_selected_camera(camera_feed, &id, selected_settings).await?;
+        lock_initialized_camera(camera_feed, &id).await?
+    };
+
+    validate_camera_receiving(&lock, &id).await?;
+    Ok(Some(Arc::new(lock)))
+}
+
+async fn initialize_selected_microphone(
+    mic_feed: &kameo::actor::ActorRef<microphone::MicrophoneFeed>,
+    label: &str,
+    settings: Option<microphone::MicrophoneDeviceSettings>,
+) -> anyhow::Result<()> {
+    let ready = mic_feed
+        .ask(microphone::SetInput {
+            label: label.to_string(),
+            settings,
+        })
+        .await
+        .map_err(|err| anyhow!("Failed to initialize selected microphone '{label}': {err}"))?;
+
+    ready.await.map(|_| ()).map_err(|err| match err {
+        microphone::SetInputError::DeviceNotFound => {
+            anyhow!("Selected microphone '{label}' is no longer available")
+        }
+        err => anyhow!("Failed to initialize selected microphone '{label}': {err}"),
+    })
+}
+
+async fn lock_initialized_microphone(
+    mic_feed: &kameo::actor::ActorRef<microphone::MicrophoneFeed>,
+    label: &str,
+) -> anyhow::Result<microphone::MicrophoneFeedLock> {
+    match mic_feed.ask(microphone::Lock).await {
+        Ok(lock) => Ok(lock),
+        Err(kameo::error::SendError::HandlerError(microphone::LockFeedError::NoInput)) => Err(
+            anyhow!("Selected microphone '{label}' did not become ready after initialization"),
+        ),
+        Err(err) => Err(anyhow!(
+            "Failed to lock selected microphone '{label}': {err}"
+        )),
+    }
+}
+
+async fn validate_microphone_receiving(
+    lock: &microphone::MicrophoneFeedLock,
+    label: &str,
+) -> anyhow::Result<()> {
+    let (tx, rx) = flume::bounded(1);
+    let remove_sender = tx.clone();
+
+    lock.ask(microphone::AddSender(tx))
+        .await
+        .map_err(|err| anyhow!("Failed to probe selected microphone '{label}': {err}"))?;
+
+    let result = tokio::time::timeout(MICROPHONE_INPUT_PROBE_TIMEOUT, rx.recv_async()).await;
+    let _ = lock.ask(microphone::RemoveSender(remove_sender)).await;
+
+    match result {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(_)) => Err(anyhow!(
+            "Selected microphone '{label}' stopped before sending audio"
+        )),
+        Err(_) => Err(anyhow!(
+            "Selected microphone '{label}' is not sending audio"
+        )),
+    }
+}
+
 pub fn format_project_name<'a>(
     template: Option<&str>,
     target_name: &'a str,
@@ -659,23 +843,6 @@ pub async fn start_recording(
         {
             let mut app_state = state_mtx.write().await;
             app_state.was_camera_only_recording = true;
-
-            let (current_mirrored, current_background_blur) = app_state
-                .camera_preview
-                .get_state()
-                .map(|s| (s.mirrored, s.background_blur))
-                .unwrap_or_default();
-
-            let camera_state = CameraPreviewState {
-                size: crate::camera::CAMERA_PRESET_LARGE,
-                shape: CameraPreviewShape::Full,
-                mirrored: current_mirrored,
-                background_blur: current_background_blur,
-            };
-
-            if let Err(err) = app_state.camera_preview.set_state(camera_state) {
-                error!("Failed to set camera preview state for camera-only mode: {err}");
-            }
         }
 
         let operation_lock = app.state::<CameraWindowOperationLock>();
@@ -911,9 +1078,7 @@ pub async fn start_recording(
         let inputs = inputs.clone();
         async move {
             fail!("recording::spawn_actor");
-            use kameo::error::SendError;
 
-            // Initialize camera if selected but not active
             let (camera_feed_actor, selected_camera_id, selected_camera_settings) = {
                 let state = state_mtx.read().await;
                 let selected_camera_settings = state.selected_camera_id.as_ref().and_then(|id| {
@@ -929,51 +1094,15 @@ pub async fn start_recording(
                 )
             };
 
-            let camera_lock_result = camera_feed_actor.ask(camera::Lock).await;
-
-            let camera_feed_lock = match camera_lock_result {
-                Ok(lock) => Some(lock),
-                Err(SendError::HandlerError(camera::LockFeedError::NoInput)) => {
-                    if let Some(id) = selected_camera_id {
-                        info!(
-                            "Camera selected but not initialized, initializing: {:?}",
-                            id
-                        );
-                        match camera_feed_actor
-                            .ask(camera::SetInput {
-                                id: id.clone(),
-                                settings: selected_camera_settings,
-                            })
-                            .await
-                        {
-                            Ok(fut) => match fut.await {
-                                Ok(_) => match camera_feed_actor.ask(camera::Lock).await {
-                                    Ok(lock) => Some(lock),
-                                    Err(e) => {
-                                        warn!("Failed to lock camera after initialization: {}", e);
-                                        None
-                                    }
-                                },
-                                Err(e) => {
-                                    warn!("Failed to initialize camera: {}", e);
-                                    None
-                                }
-                            },
-                            Err(e) => {
-                                warn!("Failed to ask SetInput: {}", e);
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    }
-                }
-                Err(e) => return Err(anyhow!(e.to_string())),
-            };
+            let camera_feed = lock_selected_camera(
+                &camera_feed_actor,
+                selected_camera_id,
+                selected_camera_settings,
+                &inputs.capture_target,
+            )
+            .await?;
 
             let mut state = state_mtx.write().await;
-
-            let camera_feed = camera_feed_lock.map(Arc::new);
 
             state.camera_in_use = camera_feed.is_some();
 
@@ -1610,34 +1739,30 @@ async fn lock_selected_microphone(
         return Ok(None);
     };
 
-    match mic_feed.ask(microphone::Lock).await {
-        Ok(lock) => return Ok(Some(Arc::new(lock))),
-        Err(kameo::error::SendError::HandlerError(microphone::LockFeedError::NoInput)) => {}
-        Err(err) => return Err(anyhow!(err.to_string())),
-    }
-
-    let ready = mic_feed
-        .ask(microphone::SetInput {
-            label: label.clone(),
-            settings: selected_settings,
-        })
-        .await
-        .map_err(|err| anyhow!(err.to_string()))?;
-
-    ready.await.map_err(|err| match err {
-        microphone::SetInputError::DeviceNotFound => {
-            anyhow!("Selected microphone '{label}' is no longer available")
+    let existing_lock = match mic_feed.ask(microphone::Lock).await {
+        Ok(lock) if lock.device_name() == label => Some(lock),
+        Ok(lock) => {
+            drop(lock);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            None
         }
-        err => anyhow!("Failed to initialize selected microphone '{label}': {err}"),
-    })?;
+        Err(kameo::error::SendError::HandlerError(microphone::LockFeedError::NoInput)) => None,
+        Err(err) => {
+            return Err(anyhow!(
+                "Failed to lock selected microphone '{label}': {err}"
+            ));
+        }
+    };
 
-    match mic_feed.ask(microphone::Lock).await {
-        Ok(lock) => Ok(Some(Arc::new(lock))),
-        Err(kameo::error::SendError::HandlerError(microphone::LockFeedError::NoInput)) => Err(
-            anyhow!("Selected microphone '{label}' did not become ready after initialization"),
-        ),
-        Err(err) => Err(anyhow!(err.to_string())),
-    }
+    let lock = if let Some(lock) = existing_lock {
+        lock
+    } else {
+        initialize_selected_microphone(mic_feed, &label, selected_settings).await?;
+        lock_initialized_microphone(mic_feed, &label).await?
+    };
+
+    validate_microphone_receiving(&lock, &label).await?;
+    Ok(Some(Arc::new(lock)))
 }
 
 fn mic_actor_not_running(err: &anyhow::Error) -> bool {
@@ -1673,6 +1798,92 @@ where
             error: error.to_string(),
         },
     }
+}
+
+async fn cancel_discarded_recording(
+    app: &AppHandle,
+    recording: InProgressRecording,
+) -> Option<String> {
+    match recording {
+        InProgressRecording::Instant {
+            handle,
+            segment_upload,
+            video_upload_info,
+            ..
+        } => {
+            let video_id = video_upload_info.id;
+            segment_upload.handle.abort();
+
+            if let Err(err) = handle.cancel().await {
+                warn!("Failed to cancel instant recording while discarding: {err:#}");
+            }
+
+            match segment_upload.handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => warn!("Instant upload ended while discarding recording: {err}"),
+                Err(err) if err.is_cancelled() => {}
+                Err(err) => {
+                    warn!("Failed to join instant upload while discarding recording: {err}")
+                }
+            }
+
+            crate::upload::emit_upload_complete(app, &video_id);
+            Some(video_id)
+        }
+        InProgressRecording::Studio { handle, .. } => {
+            if let Err(err) = handle.cancel().await {
+                warn!("Failed to cancel studio recording while discarding: {err:#}");
+            }
+
+            None
+        }
+    }
+}
+
+async fn remove_recording_dir(recording_dir: &Path) -> Result<(), String> {
+    match tokio::fs::remove_dir_all(recording_dir).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("Failed to delete recording files: {err}")),
+    }
+}
+
+async fn delete_remote_instant_video(app: &AppHandle, video_id: &str) -> Result<(), String> {
+    let response = app
+        .authed_api_request(
+            format!("/api/desktop/video/delete?videoId={video_id}"),
+            |client, url| client.delete(url),
+        )
+        .await
+        .map_err(|err| format!("Failed to delete instant recording: {err}"))?;
+
+    let status = response.status();
+    if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|err| format!("Failed to read response body: {err}"));
+
+    Err(format!(
+        "Failed to delete instant recording {video_id}: {status}: {body}"
+    ))
+}
+
+async fn discard_recording(app: &AppHandle, recording: InProgressRecording) -> Result<(), String> {
+    let recording_dir = recording.recording_dir().clone();
+    let video_id = cancel_discarded_recording(app, recording).await;
+    let local_delete = remove_recording_dir(&recording_dir).await;
+    let remote_delete = if let Some(video_id) = video_id {
+        delete_remote_instant_video(app, &video_id).await
+    } else {
+        Ok(())
+    };
+
+    remote_delete?;
+    local_delete
 }
 
 #[tauri::command]
@@ -1719,7 +1930,7 @@ pub async fn restart_recording(
 
     let inputs = recording.inputs().clone();
 
-    let _ = recording.cancel().await;
+    discard_recording(&app, recording).await?;
 
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
@@ -1736,41 +1947,11 @@ pub async fn delete_recording(app: AppHandle, state: MutableState<'_, App>) -> R
     };
 
     if let Some(recording) = recording_data {
-        let recording_dir = recording.recording_dir().clone();
         CurrentRecordingChanged.emit(&app).ok();
         RecordingStopped {}.emit(&app).ok();
 
-        let video_id = match &recording {
-            InProgressRecording::Instant {
-                video_upload_info,
-                segment_upload,
-                ..
-            } => {
-                debug!(
-                    "User deleted recording. Aborting multipart upload for {:?}",
-                    video_upload_info.id
-                );
-                segment_upload.handle.abort();
+        let delete_result = discard_recording(&app, recording).await;
 
-                Some(video_upload_info.id.clone())
-            }
-            _ => None,
-        };
-
-        let _ = recording.cancel().await;
-
-        std::fs::remove_dir_all(&recording_dir).ok();
-
-        if let Some(id) = video_id {
-            let _ = app
-                .authed_api_request(
-                    format!("/api/desktop/video/delete?videoId={id}"),
-                    |c, url| c.delete(url),
-                )
-                .await;
-        }
-
-        // Check user's post-deletion behavior setting
         let settings = GeneralSettingsStore::get(&app)
             .ok()
             .flatten()
@@ -1790,6 +1971,8 @@ pub async fn delete_recording(app: AppHandle, state: MutableState<'_, App>) -> R
                 .await;
             }
         }
+
+        delete_result?;
     }
 
     Ok(())
@@ -2068,11 +2251,6 @@ async fn handle_recording_end(
 
     if app.was_camera_only_recording {
         app.was_camera_only_recording = false;
-
-        let default_state = CameraPreviewState::default();
-        if let Err(err) = app.camera_preview.set_state(default_state) {
-            error!("Failed to reset camera preview state after camera-only recording: {err}");
-        }
     }
 
     let res = match recording {
