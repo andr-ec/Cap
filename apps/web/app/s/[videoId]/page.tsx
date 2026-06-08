@@ -13,7 +13,7 @@ import {
 	videoUploads,
 } from "@cap/database/schema";
 import type { VideoMetadata } from "@cap/database/types";
-import { buildEnv } from "@cap/env";
+import { buildEnv, serverEnv } from "@cap/env";
 import { Logo } from "@cap/ui";
 import { userIsPro } from "@cap/utils";
 import {
@@ -47,6 +47,7 @@ import {
 	canManageOrganizationSettings,
 	getEffectiveOrganizationRole,
 } from "@/lib/permissions/roles";
+import { resolveDefaultPlaybackSpeed } from "@/lib/playback-speed";
 import * as EffectRuntime from "@/lib/server";
 import { runPromise } from "@/lib/server";
 import {
@@ -551,6 +552,10 @@ async function AuthorizedContent({
 		organizationSettings: video.orgSettings,
 		spaces: sharedSpaces.filter((space) => space.id !== space.organizationId),
 	});
+	const env = serverEnv();
+	const transcriptionGenerationAvailable =
+		Boolean(env.DEEPGRAM_API_KEY) && !rules.settings.disableTranscript;
+	const aiProviderAvailable = Boolean(env.GROQ_API_KEY || env.OPENAI_API_KEY);
 
 	let aiGenerationEnabled = false;
 	const videoOwnerQuery = await db()
@@ -569,7 +574,7 @@ async function AuthorizedContent({
 	}
 
 	if (
-		!rules.settings.disableTranscript &&
+		transcriptionGenerationAvailable &&
 		!video.hasActiveUpload &&
 		video.transcriptionStatus !== "COMPLETE" &&
 		video.transcriptionStatus !== "PROCESSING" &&
@@ -830,6 +835,11 @@ async function AuthorizedContent({
 		rawFileKey: video.activeUploadRawFileKey,
 	});
 
+	const defaultPlaybackSpeed = resolveDefaultPlaybackSpeed(
+		video.videoSettings?.defaultPlaybackSpeed,
+		video.orgSettings?.defaultPlaybackSpeed,
+	);
+
 	return (
 		<div className="container flex-1 px-4 mx-auto">
 			<ShareHeader
@@ -862,8 +872,10 @@ async function AuthorizedContent({
 				viewerId={user?.id ?? null}
 				isEditProcessing={isEditProcessing}
 				recordingStopped={recordingStopped}
+				defaultPlaybackSpeed={defaultPlaybackSpeed}
 				initialAiData={initialAiData}
-				aiGenerationEnabled={aiGenerationEnabled}
+				aiGenerationAvailable={aiGenerationEnabled && aiProviderAvailable}
+				transcriptionGenerationAvailable={transcriptionGenerationAvailable}
 			/>
 		</div>
 	);
