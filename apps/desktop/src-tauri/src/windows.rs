@@ -700,6 +700,30 @@ fn is_position_on_any_screen(pos_x: f64, pos_y: f64) -> bool {
     false
 }
 
+// Recovers a window that ended up entirely off every connected display (e.g. the
+// monitor it was on got disconnected), which otherwise leaves it open but unreachable.
+fn recenter_window_if_offscreen(window: &WebviewWindow) {
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let scale = window.scale_factor().unwrap_or(1.0);
+
+    let on_screen = Display::list()
+        .iter()
+        .any(|display| display.intersects(position, size, scale));
+    if on_screen {
+        return;
+    }
+
+    let monitor = CursorMonitorInfo::get();
+    let (pos_x, pos_y) =
+        monitor.center_position(size.width as f64 / scale, size.height as f64 / scale);
+    let _ = window.set_position(tauri::LogicalPosition::new(pos_x, pos_y));
+}
+
 fn ensure_settings_window_bounds(window: &WebviewWindow) {
     const MIN_W: f64 = 780.0;
     const MIN_H: f64 = 560.0;
@@ -1330,6 +1354,10 @@ impl ShowCapWindow {
                     let _ = window.set_ignore_cursor_events(false);
                 }
 
+                if matches!(self, Self::Main { .. } | Self::Settings { .. }) {
+                    recenter_window_if_offscreen(&window);
+                }
+
                 window.show().ok();
                 window.unminimize().ok();
                 window.set_focus().ok();
@@ -1941,8 +1969,9 @@ impl ShowCapWindow {
                         warn!("Detected existing camera preview, will reuse it");
                     }
 
-                    let title = CapWindowId::Camera.title();
-                    let should_protect = should_protect_window(app, &title);
+                    // Camera protection is applied per recording mode in `start_recording`;
+                    // protecting at creation hides the live preview on virtual/mirrored displays.
+                    let should_protect = false;
 
                     #[cfg(target_os = "macos")]
                     let panel_activation_guard = permissions::prepare_macos_panel_window(app);
@@ -1994,7 +2023,11 @@ impl ShowCapWindow {
                     lock_window_text_scale(&window);
 
                     #[cfg(target_os = "windows")]
-                    log_window_content_protection(&window, should_protect, &title);
+                    log_window_content_protection(
+                        &window,
+                        should_protect,
+                        &CapWindowId::Camera.title(),
+                    );
 
                     let camera_monitor = CapWindowId::Main
                         .get(app)
@@ -2728,7 +2761,23 @@ fn position_traffic_lights_impl(
         .ok();
 }
 
-fn should_protect_window(app: &AppHandle<Wry>, window_title: &str) -> bool {
+// Capture exclusion (WDA_EXCLUDEFROMCAPTURE / NSWindowSharingType::None) also hides
+// the window from "capture-based" displays such as virtual/indirect/dummy-HDMI or
+// mirrored monitors, making it invisible and unreachable. We therefore only protect
+// Cap's own windows while a recording is actually active, which is the only time the
+// exclusion is meaningful.
+fn content_protection_enabled(app: &AppHandle<Wry>) -> bool {
+    app.try_state::<ArcLock<crate::App>>()
+        .and_then(|state| {
+            state
+                .try_read()
+                .ok()
+                .map(|app| app.is_recording_active_or_pending())
+        })
+        .unwrap_or(false)
+}
+
+fn window_matches_exclusion_list(app: &AppHandle<Wry>, window_title: &str) -> bool {
     let matches = |list: &[WindowExclusion]| {
         list.iter()
             .any(|entry| entry.matches(None, None, Some(window_title)))
@@ -2739,6 +2788,35 @@ fn should_protect_window(app: &AppHandle<Wry>, window_title: &str) -> bool {
         .flatten()
         .map(|settings| matches(&settings.excluded_windows))
         .unwrap_or_else(|| matches(&general_settings::default_excluded_windows()))
+}
+
+fn should_protect_window(app: &AppHandle<Wry>, window_title: &str) -> bool {
+    content_protection_enabled(app) && window_matches_exclusion_list(app, window_title)
+}
+
+pub fn apply_content_protection(app: &AppHandle<Wry>, enabled: bool) {
+    for (label, window) in app.webview_windows() {
+        let Ok(id) = CapWindowId::from_str(&label) else {
+            continue;
+        };
+
+        // The camera window's protection depends on the recording mode (studio excludes
+        // the preview, instant keeps it) and is driven from `start_recording`. Only ever
+        // clear it here so it stays visible outside of recordings.
+        if matches!(id, CapWindowId::Camera) {
+            if !enabled {
+                let _ = window.set_content_protected(false);
+            }
+            continue;
+        }
+
+        let title = id.title();
+        let should_protect = enabled && window_matches_exclusion_list(app, &title);
+        let _ = window.set_content_protected(should_protect);
+
+        #[cfg(target_os = "windows")]
+        log_window_content_protection(&window, should_protect, &title);
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -2837,18 +2915,8 @@ fn log_window_content_protection(window: &WebviewWindow, enabled: bool, window_t
 #[specta::specta]
 #[instrument(skip(app))]
 pub fn refresh_window_content_protection(app: AppHandle<Wry>) -> Result<(), String> {
-    for (label, window) in app.webview_windows() {
-        if let Ok(id) = CapWindowId::from_str(&label) {
-            let title = id.title();
-            let should_protect = should_protect_window(&app, &title);
-            window
-                .set_content_protected(should_protect)
-                .map_err(|e| e.to_string())?;
-            #[cfg(target_os = "windows")]
-            log_window_content_protection(&window, should_protect, &title);
-        }
-    }
-
+    let enabled = content_protection_enabled(&app);
+    apply_content_protection(&app, enabled);
     Ok(())
 }
 
