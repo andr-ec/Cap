@@ -48,6 +48,7 @@ use std::{
 };
 use tauri::{AppHandle, Manager, path::BaseDirectory};
 use tauri_plugin_dialog::{DialogExt, MessageDialogBuilder};
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tauri_specta::Event;
 use tracing::*;
 
@@ -3010,6 +3011,18 @@ async fn handle_recording_end(
         let _ = window.hide();
     }
 
+    // Destroy any target-select overlays that were hidden when recording started
+    // so they don't reappear when the main window comes back.
+    let focus_manager = handle.try_state::<crate::target_select_overlay::WindowFocusManager>();
+    for (label, window) in handle.webview_windows() {
+        if let Ok(CapWindowId::TargetSelectOverlay { display_id }) = CapWindowId::from_str(&label) {
+            hide_overlay(&window);
+            if let Some(ref fm) = focus_manager {
+                fm.destroy(&display_id, handle.global_shortcut());
+            }
+        }
+    }
+
     if let Some(camera) = CapWindowId::Camera.get(&handle) {
         let _ = camera.hide();
     }
@@ -3375,6 +3388,7 @@ async fn handle_recording_finish(
                 Some(SharingMeta {
                     link: video_upload_info.link,
                     id: video_upload_info.id,
+                    content_hash: None,
                 }),
             )
         }
