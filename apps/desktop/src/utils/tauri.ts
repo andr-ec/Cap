@@ -471,6 +471,15 @@ async automationShouldOpenScreenshotEditor(target: ScreenCaptureTarget) : Promis
 },
 async listAutomationCapabilities() : Promise<string[]> {
     return await TAURI_INVOKE("list_automation_capabilities");
+},
+async updatesCheck() : Promise<UpdateCheckResult | null> {
+    return await TAURI_INVOKE("updates_check");
+},
+async updatesDownloadAndInstall() : Promise<null> {
+    return await TAURI_INVOKE("updates_download_and_install");
+},
+async updatesChannelChanged() : Promise<null> {
+    return await TAURI_INVOKE("updates_channel_changed");
 }
 }
 
@@ -504,6 +513,8 @@ requestSetTargetMode: RequestSetTargetMode,
 requestStartRecording: RequestStartRecording,
 setCaptureAreaPending: SetCaptureAreaPending,
 targetUnderCursor: TargetUnderCursor,
+updateDownloadProgress: UpdateDownloadProgress,
+updateReady: UpdateReady,
 uploadProgressEvent: UploadProgressEvent,
 videoImportProgress: VideoImportProgress
 }>({
@@ -533,6 +544,8 @@ requestSetTargetMode: "request-set-target-mode",
 requestStartRecording: "request-start-recording",
 setCaptureAreaPending: "set-capture-area-pending",
 targetUnderCursor: "target-under-cursor",
+updateDownloadProgress: "update-download-progress",
+updateReady: "update-ready",
 uploadProgressEvent: "upload-progress-event",
 videoImportProgress: "video-import-progress"
 })
@@ -755,7 +768,7 @@ previousRecordingsPaths?: string[];
  * Cleared automatically when the app version changes (one retry per
  * update, since a new ort/wgpu/driver stack may have fixed the crash).
  */
-cameraBlurDisabledByCrash?: string | null }
+cameraBlurDisabledByCrash?: string | null; updateChannel?: UpdateChannel }
 export type GifExportSettings = { fps: number; resolution_base: XY<number>; quality: GifQuality | null }
 export type GifQuality = { 
 /**
@@ -837,7 +850,7 @@ textSizeVersion?: number }
 export type ProjectRecordingsMeta = { segments: SegmentRecordings[] }
 export type RecordingAction = "Started" | "InvalidAuthentication" | "UpgradeRequired"
 export type RecordingDeleted = { path: string }
-export type RecordingEvent = { variant: "Countdown"; value: number } | { variant: "Started" } | { variant: "Stopped" } | { variant: "Paused" } | { variant: "Resumed" } | { variant: "Failed"; error: string } | { variant: "InputLost"; input: RecordingInputKind } | { variant: "InputRestored"; input: RecordingInputKind } | { variant: "Degraded"; reason: string } | { variant: "Recovered" }
+export type RecordingEvent = { variant: "Countdown"; value: number } | { variant: "Started" } | { variant: "Stopped" } | { variant: "Paused" } | { variant: "Resumed" } | { variant: "Failed"; error: string } | { variant: "StartFailed"; error: string } | { variant: "InputLost"; input: RecordingInputKind } | { variant: "InputRestored"; input: RecordingInputKind } | { variant: "Degraded"; reason: string } | { variant: "Recovered" }
 export type RecordingInputKind = "microphone" | "camera"
 export type RecordingMeta = (StudioRecordingMeta | InstantRecordingMeta) & { platform?: Platform | null; pretty_name: string; sharing?: SharingMeta | null; upload?: UploadMeta | null }
 export type RecordingMetaWithMetadata = ((StudioRecordingMeta | InstantRecordingMeta) & { platform?: Platform | null; pretty_name: string; sharing?: SharingMeta | null; upload?: UploadMeta | null }) & { mode: RecordingMode; status: StudioRecordingStatus; clip_count: number }
@@ -896,6 +909,10 @@ export type TimelineConfiguration = { segments: TimelineSegment[]; zoomSegments:
 export type TimelineSegment = { recordingSegment?: number; timescale: number; start: number; end: number; name?: string | null }
 export type TranscriptionEngine = "Whisper" | "Parakeet"
 export type Trigger = "screenshotTaken" | "studioRecordingFinished" | "instantRecordingFinished" | "recordingStarted" | "uploadCompleted" | "videoImported" | "recordingDeleted"
+export type UpdateChannel = "stable" | "nightly"
+export type UpdateCheckResult = { version: string; notes: string | null; channel: UpdateChannel }
+export type UpdateDownloadProgress = { downloaded: number; total: number | null }
+export type UpdateReady = { version: string; installed: boolean }
 export type UploadMeta = { state: "MultipartUpload"; video_id: string; file_path: string; pre_created_video: VideoUploadInfo; recording_dir: string } | { state: "SinglePartUpload"; video_id: string; recording_dir: string; file_path: string; screenshot_path: string } | { state: "SegmentUpload"; video_id: string; pre_created_video: VideoUploadInfo; recording_dir: string } | { state: "Failed"; error: string } | { state: "Complete" }
 export type UploadMode = { Initial: { pre_created_video: VideoUploadInfo | null } } | "Reupload"
 export type UploadProgress = { progress: number }
