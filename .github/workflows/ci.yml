@@ -287,6 +287,8 @@ jobs:
         uses: dtolnay/rust-toolchain@1.88.0
         with:
           targets: ${{ matrix.settings.target }}
+          # This job's "Run Clippy" step needs the clippy component installed.
+          components: clippy
 
       - uses: ./.github/actions/setup-rust-cache
         with:
