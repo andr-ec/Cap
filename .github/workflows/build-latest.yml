@@ -101,6 +101,14 @@ jobs:
         env:
           # https://github.com/tauri-apps/tauri-action/issues/740
           CI: false
+          # The release profile uses fat LTO + full debuginfo (Cargo.toml), whose
+          # link peaks well above the RAM on the standard macos-latest/windows-2022
+          # runners and thrashes for hours (the official pipeline uses xlarge mac
+          # runners + swap to absorb it). These community builds don't need those
+          # optimizations, so disable them to keep the link fast and reliable.
+          CARGO_PROFILE_RELEASE_LTO: "false"
+          CARGO_PROFILE_RELEASE_DEBUG: "0"
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUST_TARGET_TRIPLE: ${{ matrix.settings.target }}
           TAURI_ENV_TARGET_TRIPLE: ${{ matrix.settings.target }}
