@@ -19,8 +19,10 @@ import { zValidator } from "@hono/zod-validator";
 import { and, count, eq, lte } from "drizzle-orm";
 import { Effect, Option } from "effect";
 import { Hono } from "hono";
+import { after } from "next/server";
 import { z } from "zod";
 import { invalidateGoogleDriveStorageQuotaCache } from "@/lib/google-drive-storage-quota";
+import { maybeStartLiveTranscription } from "@/lib/live-transcribe";
 import { runPromise } from "@/lib/server";
 import { decodeStorageVideo } from "@/lib/video-storage";
 import {
@@ -145,6 +147,22 @@ app.get(
 								.delete(videoUploads)
 								.where(eq(videoUploads.videoId, video.id));
 						});
+					}
+
+					if (
+						video.source?.type === "desktopSegments" &&
+						!video.isScreenshot &&
+						!isScreenshot
+					) {
+						// Off the response path: this endpoint gates recording start on
+						// the desktop, so workflow dispatch must never delay it.
+						after(() =>
+							maybeStartLiveTranscription({
+								videoId: video.id,
+								ownerId: user.id,
+								orgId: video.orgId,
+							}),
+						);
 					}
 
 					return c.json({
@@ -311,6 +329,18 @@ app.get(
 					videoId: idToUse,
 					mode: "singlepart",
 				});
+
+			if (recordingMode === "desktopSegments" && !isScreenshot) {
+				// Off the response path: this endpoint gates recording start on the
+				// desktop, so workflow dispatch must never delay it.
+				after(() =>
+					maybeStartLiveTranscription({
+						videoId: idToUse,
+						ownerId: user.id,
+						orgId: videoOrgId,
+					}),
+				);
+			}
 
 			try {
 				const videoCount = await db()
