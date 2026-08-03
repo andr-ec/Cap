@@ -26,7 +26,20 @@ jobs:
           git fetch upstream main
           git checkout main
           git merge upstream/main --no-edit
-          git push origin main
+
+      # Upstream main is frequently red on `biome ci` (formatting), and mirroring
+      # it verbatim breaks the fork's Format (Biome) job every sync. Auto-format
+      # with the same pinned Biome version CI uses, and commit any fixes so the
+      # fork's main stays green without manual intervention.
+      - name: Auto-format after merge
+        run: |
+          npx --yes @biomejs/biome@2.2.0 format --write . || true
+          if ! git diff --quiet; then
+            git commit -am "style: biome-format after upstream sync"
+          fi
+
+      - name: Push main
+        run: git push origin main
 
       - name: Sync tags (force to handle conflicts)
         run: |
