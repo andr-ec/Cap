@@ -82,8 +82,12 @@ jobs:
           git checkout origin/main -- apps/desktop/src-tauri/tauri.opensource.conf.json
         shell: bash
           
+      # Must match the channel pinned in rust-toolchain.toml, otherwise the
+      # cross target's std is added to a different toolchain than the one
+      # rustup selects for the build, and the sidecar build fails with
+      # "can't find crate for `core`" (x86_64-apple-darwin on the arm64 runner).
       - name: Rust setup
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0
         with:
           targets: ${{ matrix.settings.target }}
           

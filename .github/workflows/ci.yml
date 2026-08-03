@@ -300,6 +300,14 @@ jobs:
 
       - run: node scripts/setup.js
 
+      # cargo build --all compiles cap-desktop, whose Tauri build step requires
+      # the cap-muxer sidecar to exist. cargo build --all has no --target, so it
+      # builds for the host triple (aarch64 on macos-latest, even for the
+      # x86_64-apple-darwin matrix entry) - build the sidecar for the host too.
+      - name: Build desktop binaries
+        shell: bash
+        run: ./scripts/build-desktop-binaries.sh
+
       - name: Build debug
         run: cargo build --all
 

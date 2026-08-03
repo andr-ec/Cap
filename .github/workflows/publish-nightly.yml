@@ -15,8 +15,14 @@ name: "publish-nightly"
 # shipped, and promote-nightly.yml can only promote nightlies users could run.
 
 on:
-  schedule:
-    - cron: "0 3 * * *"
+  # Scheduled nightlies are disabled on this fork: the pipeline publishes to
+  # CrabNebula Cloud (CN_APPLICATION cap/cap), which the fork has no API key
+  # for, so every scheduled run failed with "401 Could not authenticate".
+  # Automatic GitHub releases for this fork are produced by auto-build-release.yml
+  # (triggered per upstream cap-v* tag by sync-upstream.yml). Left as manual
+  # dispatch only, so it can still be run if a CN_API_KEY is ever configured.
+  # schedule:
+  #   - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
       force:
