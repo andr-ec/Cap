@@ -59,7 +59,10 @@ jobs:
             runner: macos-latest
             name: "macOS Apple Silicon"
           - target: x86_64-pc-windows-msvc
-            runner: windows-latest
+            # Pin to 2022 to match desktop-release.yml/ci.yml: windows-latest
+            # (now windows-2025) ships a newer clang that makes ffmpeg-sys-next's
+            # bindgen emit const layout asserts that fail with E0080.
+            runner: windows-2022
             name: "Windows x64"
     
     runs-on: ${{ matrix.settings.runner }}
@@ -180,7 +183,7 @@ jobs:
           fi
           
       - name: Prepare artifacts (Windows)
-        if: matrix.settings.runner == 'windows-latest'
+        if: matrix.settings.runner == 'windows-2022'
         run: |
           mkdir artifacts
           cd target/${{ matrix.settings.target }}/release

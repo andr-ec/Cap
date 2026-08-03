@@ -19,7 +19,10 @@ jobs:
           - target: aarch64-apple-darwin
             runner: macos-latest
           - target: x86_64-pc-windows-msvc
-            runner: windows-latest
+            # Pin to 2022 to match desktop-release.yml/ci.yml: windows-latest
+            # (now windows-2025) ships a newer clang that makes ffmpeg-sys-next's
+            # bindgen emit const layout asserts that fail with E0080.
+            runner: windows-2022
     
     runs-on: ${{ matrix.settings.runner }}
     
