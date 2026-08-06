@@ -60,6 +60,12 @@ export type CommentType = typeof commentsSchema.$inferSelect & {
 	authorName?: string | null;
 	authorImage?: ImageUpload.ImageUrl | null;
 	sending?: boolean;
+	/**
+	 * The optimistic entry's temp id, carried onto the saved comment so lists
+	 * can key the pair identically — the settle then updates the mounted card
+	 * in place instead of remounting it (which would restart media playback).
+	 */
+	clientKey?: string;
 };
 
 const SESSION_STORAGE_KEY = "cap_tb_session_id";
@@ -554,6 +560,20 @@ export const Share = ({
 		}, 100);
 	}, []);
 
+	// If the settle ever commits the saved comment while its optimistic twin is
+	// still applied, both would render under the same clientKey; keep only the
+	// settled one. Almost always a no-op passthrough.
+	const visibleComments = useMemo(() => {
+		const settledKeys = new Set<string>();
+		for (const comment of optimisticComments)
+			if (!comment.sending && comment.clientKey)
+				settledKeys.add(comment.clientKey);
+		if (settledKeys.size === 0) return optimisticComments;
+		return optimisticComments.filter(
+			(comment) => !(comment.sending && settledKeys.has(comment.id)),
+		);
+	}, [optimisticComments]);
+
 	const reduceMotion = useReducedMotion() ?? false;
 	const [selectedView, setSelectedView] = useState<ShareView>(initialView);
 	// Screenshots have no timeline to show, and a comments-disabled video has
@@ -780,23 +800,28 @@ export const Share = ({
 											{/* New surface, so it carries its own explainer. Opens in a
 								    tab of its own: leaving the page would drop playback and
 								    anything half-typed in the composer. */}
+											{/* Same shell as the Player/Timeline toggle beside it —
+											    p-0.5 track, px-3 py-1 segment — so the header reads
+											    as one family of controls, not two pill dialects. */}
 											<a
 												href={TIMELINE_GUIDE_URL}
 												target="_blank"
 												rel="noreferrer"
 												title="How does the timeline work?"
-												className="flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-gray-5 bg-white px-2 text-xs font-medium text-gray-11 transition-colors hover:bg-gray-3 hover:text-gray-12 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-9 md:px-2.5"
+												className="inline-flex shrink-0 items-center rounded-full border border-gray-5 bg-gray-3 p-0.5 text-xs font-medium text-gray-11 transition-colors hover:text-gray-12 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-9"
 											>
-												<svg
-													viewBox="0 0 16 16"
-													className="size-3.5 shrink-0 fill-current"
-													aria-hidden
-												>
-													<title>How does this work?</title>
-													<path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13Zm0 1.2a5.3 5.3 0 1 1 0 10.6A5.3 5.3 0 0 1 8 2.7Zm0 1.6c-1.2 0-2.1.7-2.4 1.8a.6.6 0 0 0 1.15.34c.16-.55.6-.94 1.25-.94.7 0 1.2.44 1.2 1.03 0 .45-.2.73-.78 1.14-.66.47-.99.94-.96 1.72a.6.6 0 0 0 1.2-.04c-.02-.35.1-.53.53-.83.75-.53 1.21-1.08 1.21-2 0-1.25-1.02-2.22-2.4-2.22Zm0 6.05a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z" />
-												</svg>
-												<span className="hidden md:inline">
-													How does this work?
+												<span className="flex items-center gap-1.5 rounded-full px-3 py-1">
+													<svg
+														viewBox="0 0 16 16"
+														className="size-3.5 shrink-0 fill-current"
+														aria-hidden
+													>
+														<title>How does this work?</title>
+														<path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13Zm0 1.2a5.3 5.3 0 1 1 0 10.6A5.3 5.3 0 0 1 8 2.7Zm0 1.6c-1.2 0-2.1.7-2.4 1.8a.6.6 0 0 0 1.15.34c.16-.55.6-.94 1.25-.94.7 0 1.2.44 1.2 1.03 0 .45-.2.73-.78 1.14-.66.47-.99.94-.96 1.72a.6.6 0 0 0 1.2-.04c-.02-.35.1-.53.53-.83.75-.53 1.21-1.08 1.21-2 0-1.25-1.02-2.22-2.4-2.22Zm0 6.05a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z" />
+													</svg>
+													<span className="hidden md:inline">
+														How does this work?
+													</span>
 												</span>
 											</a>
 											<ShareViewToggle
@@ -981,6 +1006,7 @@ export const Share = ({
 														onCommentSuccess={handleCommentSuccess}
 														disableComments={areCommentStampsDisabled}
 														disableReactions={areReactionStampsDisabled}
+														canRecordMedia={canRecordMedia && !isScreenshot}
 														data={data}
 													/>
 												</div>
@@ -994,7 +1020,7 @@ export const Share = ({
 											>
 												<Suspense fallback={<TimelineSkeleton />}>
 													<TimelineView
-														comments={optimisticComments}
+														comments={visibleComments}
 														videoId={data.id}
 														chapters={aiData?.chapters ?? undefined}
 														transcriptionStatus={transcriptionStatus}
@@ -1108,7 +1134,7 @@ export const Share = ({
 									videoSettings={videoSettings}
 									commentsData={commentsData}
 									setCommentsData={setCommentsData}
-									optimisticComments={optimisticComments}
+									optimisticComments={visibleComments}
 									setOptimisticComments={setOptimisticComments}
 									handleCommentSuccess={handleCommentSuccess}
 									views={views}
